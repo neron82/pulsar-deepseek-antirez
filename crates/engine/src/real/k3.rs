@@ -642,7 +642,7 @@ impl Model {
         kernels::quantize_q8_k(&mut st.xq, &rt.lat_in, s.n_expert_latent, 1)?;
         kernels::sync()?;
         let selected = st.router_selected.read_i32(s.n_expert_used as usize)?;
-        self.dsv4_moe(st, &selected, gate_exps, up_exps, down_exps, 0, 1, s.n_expert_latent)?;
+        self.dsv4_moe(st, il, &selected, gate_exps, up_exps, down_exps, 0, 1, s.n_expert_latent)?;
         // moe_out is latent-wide here, not n_embd
         if let Some(n) = &routed.norm {
             kernels::rms_norm(&mut rt.lat_out, &st.moe_out, n, s.n_expert_latent, 1, s.rms_eps)?;

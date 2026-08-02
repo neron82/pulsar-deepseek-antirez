@@ -1570,6 +1570,21 @@ fn handle_chat(
     let tool_phase = std::cell::Cell::new(false);
     let mut emitted: Vec<u32> = Vec::new();
 
+    // PULSAR_VERBOSE=1: per-request prefill/decode telemetry. The
+    // prefilling line lands BEFORE generation so a quiet prefill phase
+    // (long prompt, no tokens yet) shows activity instead of silence.
+    let verbose = std::env::var_os("PULSAR_VERBOSE").is_some();
+    let t0 = std::time::Instant::now();
+    let miss0 = st.dev_cache.misses;
+    let t_first = std::cell::Cell::new(None);
+    let prefill_n = prompt.len().saturating_sub(common);
+    if verbose && prefill_n > 0 {
+        eprintln!(
+            "pulsar-serve: {id}: prefilling {prefill_n}/{} tokens (prefix cache hit {common})",
+            prompt.len()
+        );
+    }
+
     if streaming {
         write!(
             stream,
@@ -1648,6 +1663,9 @@ fn handle_chat(
                 s
             },
             |t| {
+                if t_first.get().is_none() {
+                    t_first.set(Some(std::time::Instant::now()));
+                }
                 ka_started.store(true, std::sync::atomic::Ordering::Relaxed);
                 n_out += 1;
                 emitted.push(t);
@@ -1774,7 +1792,27 @@ fn handle_chat(
         });
         let _ = write!(stream, "data: {fin}\n\ndata: [DONE]\n\n");
         let _ = stream.flush();
-        eprintln!("pulsar-serve: {id}: {} prompt + {n_out} completion tokens (streamed)", prompt.len());
+        eprintln!(
+            "pulsar-serve: {id}: {} prompt + {n_out} completion tokens (streamed, {} tok/s)",
+            prompt.len(),
+            if n_out > 0 {
+                format!("{:.1}", n_out as f64 / t0.elapsed().as_secs_f64().max(1e-9))
+            } else {
+                "-".into()
+            }
+        );
+        if verbose {
+            let elapsed = t0.elapsed().as_secs_f64().max(1e-9);
+            let prefill_s = t_first.get().map(|t| t.elapsed().as_secs_f64()).unwrap_or(0.0);
+            let pp = if prefill_n > 0 { prefill_n as f64 / prefill_s.max(1e-9) } else { 0.0 };
+            let slab_miss = st.dev_cache.misses.saturating_sub(miss0);
+            let dt = if t_first.get().is_some() { elapsed - prefill_s } else { 0.0 };
+            let dec = if n_out > 0 && dt > 0.0 { n_out as f64 / dt } else { 0.0 };
+            eprintln!(
+                "pulsar-serve: {id}: prefill {prefill_n} tok in {prefill_s:.2}s ({pp:.0} tok/s), \
+                 decode {n_out} tok in {dt:.2}s ({dec:.1} tok/s), {slab_miss} slabs from disk"
+            );
+        }
         if cache_ok {
             *hist = prompt;
             hist.extend(&emitted);
@@ -1827,6 +1865,9 @@ fn handle_chat(
                     s
                 },
                 |t| {
+                    if t_first.get().is_none() {
+                        t_first.set(Some(std::time::Instant::now()));
+                    }
                     n_out_total += 1;
                     emitted_t.push(t);
                     out.extend_from_slice(&tok.decode(&[t]));
@@ -1930,8 +1971,25 @@ fn handle_chat(
             },
         });
         eprintln!(
-            "pulsar-serve: {id}: {prompt_len} prompt + {n_out_total} completion tokens (non-stream)"
+            "pulsar-serve: {id}: {prompt_len} prompt + {n_out_total} completion tokens (non-stream, {} tok/s)",
+            if n_out_total > 0 {
+                format!("{:.1}", n_out_total as f64 / t0.elapsed().as_secs_f64().max(1e-9))
+            } else {
+                "-".into()
+            }
         );
+        if verbose {
+            let elapsed = t0.elapsed().as_secs_f64().max(1e-9);
+            let prefill_s = t_first.get().map(|t| t.elapsed().as_secs_f64()).unwrap_or(0.0);
+            let pp = if prefill_n > 0 { prefill_n as f64 / prefill_s.max(1e-9) } else { 0.0 };
+            let slab_miss = st.dev_cache.misses.saturating_sub(miss0);
+            let dt = if t_first.get().is_some() { elapsed - prefill_s } else { 0.0 };
+            let dec = if n_out_total > 0 && dt > 0.0 { n_out_total as f64 / dt } else { 0.0 };
+            eprintln!(
+                "pulsar-serve: {id}: prefill {prefill_n} tok in {prefill_s:.2}s ({pp:.0} tok/s), \
+                 decode {n_out_total} tok in {dt:.2}s ({dec:.1} tok/s), {slab_miss} slabs from disk"
+            );
+        }
         respond_json(stream, 200, &json)?;
     }
     Ok(())

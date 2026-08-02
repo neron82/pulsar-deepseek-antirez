@@ -16,7 +16,10 @@ use kernels::DeviceBuf;
 const NEG_INF: f32 = -1.0e30; // DS4_NEG_INF (finite on purpose)
 /// Batched prefill chunk width (matches the qwen35 blueprint; the
 /// per-token interleave keeps the SWA ring correct within a chunk).
-const T_MAX: usize = 16;
+const T_MAX: usize = 128; // SWA ring cap: larger chunks are impossible
+                           // (ring slots would clobber), smaller chunks
+                           // starve the grouped MoE tiles (measured: 16er
+                           // chunks => 62% of prefill time in moe-kernels)
 const ROUTER_FLOOR: f32 = 6.103515625e-5;
 
 /* ---- host float helpers (reference math) ------------------------------- */
@@ -599,6 +602,28 @@ pub(super) struct LayerRt {
     pub n_idx_comp: u32,
 }
 
+/// Per-chunk stage timers for the dsv4 prefill path. The shared Prof is
+/// only fed by eval_layer's resolve; dsv4's eval_dsv4_layer/dsv4_moe never
+/// touch it, so prefill profiling was a blind spot. These accumulate over
+/// one chunk (reset at chunk start) and print when PULSAR_PROFILE=1.
+#[derive(Default)]
+pub(super) struct Dsv4Prof {
+    pub attn_kernels: std::time::Duration, // attn matmuls/norms/rope/comp-proj
+    pub attn_token: std::time::Duration,   // per-token ring/comp/attend loop
+    pub ffn_pre: std::time::Duration,      // hc_pre, ffn_norm, router matmul
+    pub route: std::time::Duration,        // host router readback + route()
+    pub route_read: std::time::Duration,   // D2H of router_logits (sync)
+    pub route_host: std::time::Duration,   // host top-k + weight math
+    pub loop_raw: std::time::Duration,     // per-token loop, ratio==0 layers
+    pub loop_comp: std::time::Duration,    // per-token loop, ratio!=0 (no idx)
+    pub loop_idx: std::time::Duration,     // per-token loop, ratio==4 (idx+syncs)
+    pub loop_att: std::time::Duration,     // per-token attention_at kernels
+    pub moe_resolve: std::time::Duration,  // dsv4_moe: distinct/tiers/store
+    pub moe_kernels: std::time::Duration,  // dsv4_moe: GPU launches
+    pub cpu_lane: std::time::Duration,     // dsv4_moe: CPU worker join
+    pub sync: std::time::Duration,         // explicit kernel syncs
+}
+
 /// deepseek4 runtime: HC stream buffers + per-layer compressor state.
 pub(super) struct Dsv4Rt {
     /// 4 residual streams [n_hc][n_embd]
@@ -617,6 +642,7 @@ pub(super) struct Dsv4Rt {
     coef_attn: DeviceBuf,
     coef_ffn: DeviceBuf,
     layers: Vec<LayerRt>,
+    pub prof: Dsv4Prof,
 }
 
 impl Dsv4Rt {
@@ -663,6 +689,7 @@ impl Dsv4Rt {
             coef_attn: DeviceBuf::alloc(T_MAX * 6 * s.n_hc as usize * 4)?,
             coef_ffn: DeviceBuf::alloc(T_MAX * 6 * s.n_hc as usize * 4)?,
             layers,
+            prof: Dsv4Prof::default(),
         })
     }
 
@@ -813,6 +840,7 @@ impl Model {
         let row = s.n_embd as usize * 4;
         if pos0 == 0 {
             rt.reset()?;
+            rt.prof = Dsv4Prof::default();
         }
         let mut pos = pos0;
         let mut last_t = 1usize;
@@ -857,6 +885,19 @@ impl Model {
                 pos += t as u32;
                 last_t = t;
             }
+        }
+        if std::env::var_os("PULSAR_PROFILE").is_some() {
+            let s = |d: std::time::Duration| d.as_secs_f64();
+            let total = s(rt.prof.attn_kernels) + s(rt.prof.attn_token) + s(rt.prof.ffn_pre)
+                + s(rt.prof.route) + s(rt.prof.moe_kernels) + s(rt.prof.sync);
+            eprintln!(
+                "pulsar: dsv4 prefill profile: attn-kernels {:.3}s, attn-token-loop {:.3}s (raw {:.3}s + comp {:.3}s + idx {:.3}s + att {:.3}s), ffn-pre {:.3}s, route {:.3}s (read {:.3}s + host {:.3}s), moe-kernels {:.3}s, sync {:.3}s (sum {:.3}s)",
+                s(rt.prof.attn_kernels), s(rt.prof.attn_token),
+                s(rt.prof.loop_raw), s(rt.prof.loop_comp), s(rt.prof.loop_idx), s(rt.prof.loop_att),
+                s(rt.prof.ffn_pre),
+                s(rt.prof.route), s(rt.prof.route_read), s(rt.prof.route_host),
+                s(rt.prof.moe_kernels), s(rt.prof.sync), total
+            );
         }
         if rows == 0 {
             return Ok(None);
@@ -921,6 +962,7 @@ impl Model {
         let hd4 = s.head_dim as usize * 4;
 
         // ---- attention half (matmuls/norms/rope batched)
+        let t_attn = std::time::Instant::now();
         self.dsv4_hc_pre(st, rt, &w.hc_attn_fn, &w.hc_attn_scale, &w.hc_attn_base, false, t)?;
         kernels::rms_norm(&mut st.normed, &st.cur, &l.attn_norm, s.n_embd, t, eps)?;
         kernels::matmul_q8_0(&mut st.q_rank, &w.q_a, &st.normed, s.n_embd, s.n_lora_q, t)?;
@@ -974,11 +1016,19 @@ impl Model {
         // once per chunk when selection can fire inside it
         let mut idx_q_host: Vec<f32> = Vec::new();
         let mut idx_w_host: Vec<f32> = Vec::new();
+        // The visibility mask only fires once n_idx_comp exceeds
+        // n_idx_topk. Within a chunk that caps at start + ceil(t/ratio),
+        // so when the cap stays under top_k the per-emit host mirror is
+        // pure overhead (one blocking D2H every `ratio` tokens) -- skip it
+        // and sync the whole mirror once after the loop instead.
+        let idx_mask_can_fire = w.ratio != 0
+            && rt.layers[il].n_idx_comp as usize
+                + (t as usize + w.ratio as usize - 1) / w.ratio as usize
+                > s.n_idx_topk as usize;
         if let Some(idx) = &w.idx {
             kernels::matmul_q8_0(&mut rt.idx_kv, &idx.comp.kv_w, &st.normed, s.n_embd, idx.comp.width, t)?;
             kernels::matmul_q8_0(&mut rt.idx_sc, &idx.comp.gate_w, &st.normed, s.n_embd, idx.comp.width, t)?;
-            let may_select = rt.layers[il].n_idx_comp + t + 1 > s.n_idx_topk;
-            if may_select {
+            if idx_mask_can_fire {
                 kernels::matmul_q8_0(&mut rt.low, &idx.q_b, &st.q_rank_norm, s.n_lora_q, s.n_idx_head * s.n_idx_dim, t)?;
                 kernels::matmul_f32(&mut rt.idx_w, &idx.proj, &st.normed, s.n_embd, s.n_idx_head, t)?;
                 idx_q_host = rt.low.read_f32(t as usize * (s.n_idx_head * s.n_idx_dim) as usize)?;
@@ -991,6 +1041,7 @@ impl Model {
         // clobber earlier tokens' windows (ring cap 128 < chunk span +
         // window), and each token's visibility mask depends on the
         // indexer cache state AT ITS OWN position.
+        let t_loop = std::time::Instant::now();
         for i in 0..t as usize {
             let pos = pos0 + i as u32;
             let n_raw = (pos + 1).min(s.n_swa);
@@ -1030,9 +1081,11 @@ impl Model {
                 )?;
                 if emit {
                     lrt.n_idx_comp += 1;
-                    let nd = s.n_idx_dim as usize;
-                    let row = lrt.idx_cache.read_f32_at((lrt.n_idx_comp as usize - 1) * nd, nd)?;
-                    lrt.idx_cache_host.extend_from_slice(&row);
+                    if idx_mask_can_fire {
+                        let nd = s.n_idx_dim as usize;
+                        let row = lrt.idx_cache.read_f32_at((lrt.n_idx_comp as usize - 1) * nd, nd)?;
+                        lrt.idx_cache_host.extend_from_slice(&row);
+                    }
                 }
             }
             // visibility mask for THIS token once the compressed set
@@ -1080,6 +1133,8 @@ impl Model {
                     hh(&kc), hh(&vc)
                 );
             }
+            let n_comp = rt.layers[il].n_comp;
+            let t_att_at = std::time::Instant::now();
             kernels::dsv4_attention_at(
                 &mut st.heads,
                 i * q_dim as usize * 4,
@@ -1095,12 +1150,37 @@ impl Model {
                 s.head_dim,
                 1.0 / (s.head_dim as f32).sqrt(),
             )?;
+            rt.prof.loop_att += t_att_at.elapsed();
+        }
+        // When the visibility mask cannot fire inside this chunk, defer
+        // the host mirror to ONE bulk read instead of one blocking D2H
+        // per emit (measured: the per-emit syncs cost ~4.5s of the 4.7s
+        // loop time on the 3 indexer layers).
+        if w.idx.is_some() && !idx_mask_can_fire {
+            let lrt = &mut rt.layers[il];
+            if lrt.n_idx_comp > 0 {
+                let all = lrt
+                    .idx_cache
+                    .read_f32(lrt.n_idx_comp as usize * s.n_idx_dim as usize)?;
+                lrt.idx_cache_host.clear();
+                lrt.idx_cache_host.extend_from_slice(&all);
+            }
+        }
+        let t_loop_end = std::time::Instant::now();
+        let d_loop = t_loop_end.duration_since(t_loop);
+        if w.idx.is_some() {
+            rt.prof.loop_idx += d_loop;
+        } else if w.ratio != 0 {
+            rt.prof.loop_comp += d_loop;
+        } else {
+            rt.prof.loop_raw += d_loop;
         }
         if std::env::var_os("PULSAR_L0_LOG").is_some() && il <= 2 && (2046..2051).contains(&pos0) {
             kernels::sync()?;
             eprintln!("stage L{il} @{pos0} t={t} heads={:x}", l0_hash(&st.heads, q_dim as usize));
         }
         // ---- batched tail: un-rope, grouped out, hc_post
+        let t_tail = std::time::Instant::now();
         kernels::dsv4_rope_tail(&mut st.heads, t, s.n_head, s.head_dim, s.rot_dim, pos0, &rope, true)?;
         let rank = 1024usize;
         let group_dim = q_dim / s.n_out_group;
@@ -1113,13 +1193,16 @@ impl Model {
         self.dsv4_hc_post(rt, &st.attn_out, false, t)?;
 
         // ---- ffn half: ONE router readback + ONE MoE union per chunk
+        let t_ffn = std::time::Instant::now();
         self.dsv4_hc_pre(st, rt, &w.hc_ffn_fn, &w.hc_ffn_scale, &w.hc_ffn_base, true, t)?;
         kernels::rms_norm(&mut st.normed, &st.cur, &l.ffn_norm, s.n_embd, t, eps)?;
         let Ffn::Moe { gate_inp, shexp, gate_exps, up_exps, down_exps, .. } = &l.ffn else {
             return Err("dsv4 layer without MoE ffn".into());
         };
         kernels::matmul_f32(&mut st.router_logits, gate_inp, &st.normed, s.n_embd, s.n_expert, t)?;
+        let t_route = std::time::Instant::now();
         let logits = st.router_logits.read_f32((t * s.n_expert) as usize)?;
+        let t_route_read = std::time::Instant::now();
         let mut selected = Vec::with_capacity((t * s.n_expert_used) as usize);
         let mut weights = Vec::with_capacity((t * s.n_expert_used) as usize);
         for (i, &tok) in tokens.iter().enumerate() {
@@ -1136,6 +1219,10 @@ impl Model {
         }
         st.router_selected.write(0, kernels::as_bytes(&selected))?;
         st.router_weights.write(0, kernels::as_bytes(&weights))?;
+        let t_route_host = std::time::Instant::now();
+        rt.prof.route_read += t_route_read.duration_since(t_route);
+        rt.prof.route_host += t_route_host.duration_since(t_route_read);
+        let t_moe = std::time::Instant::now();
         if let Some((sg, su, sd)) = shexp {
             kernels::matmul_q8_0(&mut st.gate_act, sg, &st.normed, s.n_embd, s.n_ff_exp, t)?;
             kernels::matmul_q8_0(&mut st.up_act, su, &st.normed, s.n_embd, s.n_ff_exp, t)?;
@@ -1145,13 +1232,19 @@ impl Model {
             kernels::zero(&mut st.shared_out, (t * s.n_embd) as usize * 4)?;
         }
         kernels::quantize_q8_k(&mut st.xq, &st.normed, s.n_embd, t)?;
-        self.dsv4_moe(st, &selected, gate_exps, up_exps, down_exps, 3, t, self.shape.n_embd)?;
+        self.dsv4_moe(st, il, &selected, gate_exps, up_exps, down_exps, 3, t, self.shape.n_embd)?;
         if std::env::var_os("PULSAR_L0_LOG").is_some() && il <= 2 && (2046..2051).contains(&pos0) {
             kernels::sync()?;
             eprintln!("stage L{il} @{pos0} t={t} moe={:x} shexp={:x} sel={:?}", l0_hash(&st.moe_out, s.n_embd as usize), l0_hash(&st.shared_out, s.n_embd as usize), &selected[..s.n_expert_used.min(8) as usize]);
         }
         kernels::add(&mut st.ffn_out, &st.moe_out, &st.shared_out, t * s.n_embd)?;
         self.dsv4_hc_post(rt, &st.ffn_out, true, t)?;
+        let t_end = std::time::Instant::now();
+        rt.prof.attn_kernels += t_loop.duration_since(t_attn) + t_ffn.duration_since(t_tail);
+        rt.prof.attn_token += t_tail.duration_since(t_loop);
+        rt.prof.ffn_pre += t_route.duration_since(t_ffn);
+        rt.prof.route += t_moe.duration_since(t_route);
+        rt.prof.moe_kernels += t_end.duration_since(t_moe);
         Ok(())
     }
 
@@ -1167,9 +1260,31 @@ impl Model {
     /// tier and CPU-lane paths re-read and re-quantize it rather than
     /// reusing st.xq.
     #[allow(clippy::too_many_arguments)]
-    pub(super) fn dsv4_moe(&self, st: &mut State, selected: &[i32], gate_exps: &super::ExpertTensor, up_exps: &super::ExpertTensor, down_exps: &super::ExpertTensor, act_op: u32, n_tok: u32, w_exp: u32) -> Result {
+    pub(super) fn dsv4_moe(&self, st: &mut State, il: usize, selected: &[i32], gate_exps: &super::ExpertTensor, up_exps: &super::ExpertTensor, down_exps: &super::ExpertTensor, act_op: u32, n_tok: u32, w_exp: u32) -> Result {
         let s = self.shape;
         let primary = kernels::get_device();
+        // Claim cross-layer async H2D prefetch (dsv4 layer-crossing port of
+        // the MLA pattern): the previous layer queued this layer's predicted
+        // experts into staging_alt. Drain it into resolved BEFORE the
+        // wants-loop so prefetched offsets are not re-fetched from the store.
+        let mut resolved = std::collections::HashMap::new();
+        if st.h2d_prefetch.is_some() {
+            if let Some(pf) = st.h2d_prefetch.take() {
+                if pf.layer == il {
+                    if pf.recorded {
+                        st.expert_h2d.synchronize()?;
+                        st.expert_h2d.wait_default()?;
+                    }
+                    for (off, p) in pf.map {
+                        resolved.insert(off, p);
+                    }
+                } else if pf.recorded {
+                    // stale prediction — drain DMA so the host LFU can free
+                    // the pinned sources safely.
+                    let _ = st.expert_h2d.synchronize();
+                }
+            }
+        }
         let mut distinct: Vec<i32> = selected
             .iter()
             .copied()
@@ -1284,9 +1399,13 @@ impl Model {
             }
         }
         let in_use: Vec<u64> = offsets.iter().map(|r| r.offset).collect();
-        let mut resolved = std::collections::HashMap::new();
         let mut wants = Vec::new();
         for r in &offsets {
+            if resolved.contains_key(&r.offset) {
+                // prefetched into staging_alt by the previous layer; the
+                // drain above already claimed it
+                continue;
+            }
             if st.unified {
                 wants.push(*r);
                 continue;
@@ -1310,6 +1429,7 @@ impl Model {
         let unified = st.unified;
         let dev_cache = &mut st.dev_cache;
         let staging = &mut st.staging;
+        let mut staged_any = false;
         st.store.ensure_with(&wants, |off, payload| {
             if unified {
                 resolved.insert(off, payload.as_ptr() as *const std::ffi::c_void);
@@ -1319,13 +1439,24 @@ impl Model {
                 Some(p) => p,
                 None => {
                     let base = stage_base[&off];
-                    staging.write(base, payload)?;
+                    // async H2D on the side stream: the host returns after
+                    // queueing, the DMA overlaps the next layer's kernel
+                    // launches. wait_default below makes the MoE kernels
+                    // see completed copies (nsys: 54.5k sync cudaMemcpy =
+                    // 8.1s, mostly host wait).
+                    st.expert_h2d
+                        .copy_h2d_raw(staging, base, payload.as_ptr(), payload.len())?;
+                    staged_any = true;
                     staging.ptr_at(base)
                 }
             };
             resolved.insert(off, p);
             Ok(())
         })?;
+        if st.async_expert_h2d && staged_any {
+            st.expert_h2d.record()?;
+            st.expert_h2d.wait_default()?;
+        }
         let mut ptrs = Vec::with_capacity(selected.len());
         let mut tptrs: Vec<Vec<kernels::ExpertPtrs>> = st
             .tiers
@@ -1425,6 +1556,9 @@ impl Model {
                     )?;
                     kernels::quantize_q8_k(&mut tier.midq, &tier.mid, s.n_ff_exp, n_tok * s.n_expert_used)?;
                     let pbytes = n_tok as usize * s.n_expert_used as usize * w_exp as usize * 4;
+                    if tier.grp_partial.bytes() < pbytes {
+                        tier.grp_partial = DeviceBuf::alloc(pbytes)?;
+                    }
                     kernels::zero(&mut tier.grp_partial, pbytes)?;
                     kernels::moe_down_grouped(
                         &mut tier.grp_partial, &tier.grp_ptrs, &tier.grp_starts, &tier.grp_pairs,
@@ -1493,6 +1627,81 @@ impl Model {
             }
             st.cpu_ret.write(0, kernels::as_bytes(&acc))?;
             kernels::add_assign(&mut st.moe_out, &st.cpu_ret, n_tok * w_exp)?;
+        }
+
+        // Queue cross-layer async H2D prefetch for layer il+1
+        // (PULSAR_H2D_PREFETCH=1, dsv4 prefill): prediction = THIS chunk's
+        // selected experts (routing is temporally coherent; a wrong guess
+        // just misses and streams normally next call). The DMA runs hidden
+        // behind layer il+1's attention + router host time (~9.5s/layer),
+        // so the transfers the nsys trace attributed 8.1s to stop blocking.
+        if std::env::var_os("PULSAR_H2D_PREFETCH").is_some()
+            && st.async_expert_h2d
+            && n_tok > 1
+            && il + 1 < self.layers.len()
+        {
+            if let Ffn::Moe {
+                gate_exps: ng,
+                up_exps: nu,
+                down_exps: nd,
+                ..
+            } = &self.layers[il + 1].ffn
+            {
+                let mut pf_reads: Vec<stream::Read> = Vec::new();
+                for &e in selected {
+                    if e < 0 || e as u32 >= s.n_expert {
+                        continue;
+                    }
+                    for t in [ng, nu, nd] {
+                        let offset = t.abs_offset + e as u64 * t.expert_bytes;
+                        if st.tiers.iter().any(|tr| tr.map.contains_key(&offset))
+                            || st.dev_cache.peek(offset).is_some()
+                            || !st.store.contains(offset)
+                            || pf_reads.iter().any(|r| r.offset == offset)
+                        {
+                            continue;
+                        }
+                        pf_reads.push(stream::Read {
+                            offset,
+                            len: t.expert_bytes,
+                        });
+                    }
+                }
+                if !pf_reads.is_empty() {
+                    let mut stage_total = 0usize;
+                    let mut bases = std::collections::HashMap::new();
+                    for r in &pf_reads {
+                        bases.insert(r.offset, stage_total);
+                        stage_total += r.len as usize;
+                    }
+                    if stage_total + SLAB_SLACK > st.staging_alt.bytes() {
+                        st.staging_alt = DeviceBuf::alloc(stage_total + SLAB_SLACK)?;
+                    }
+                    let mut map = std::collections::HashMap::new();
+                    let mut queued = false;
+                    for r in &pf_reads {
+                        if let Some(payload) = st.store.payload(r.offset) {
+                            let base = bases[&r.offset];
+                            st.expert_h2d.copy_h2d_raw(
+                                &mut st.staging_alt,
+                                base,
+                                payload.as_ptr(),
+                                payload.len(),
+                            )?;
+                            map.insert(r.offset, st.staging_alt.ptr_at(base));
+                            queued = true;
+                        }
+                    }
+                    if queued {
+                        st.expert_h2d.record()?;
+                        st.h2d_prefetch = Some(super::ExpertH2dPrefetch {
+                            layer: il + 1,
+                            map,
+                            recorded: true,
+                        });
+                    }
+                }
+            }
         }
         Ok(())
     }

@@ -1415,6 +1415,8 @@ mod real {
         /// global (touch count, slab len) per requested offset, cached or not
         touch: std::collections::HashMap<u64, (u64, u64)>,
         next_group: u32,
+        /// round-robin victim cursor for the O(1) force-eviction path
+        ring_next: usize,
         pub hits: u64,
         pub misses: u64,
     }
@@ -1437,6 +1439,7 @@ mod real {
                 ungrouped: 0,
                 touch: std::collections::HashMap::new(),
                 next_group: 1,
+                ring_next: 0,
                 hits: 0,
                 misses: 0,
             })
@@ -1478,6 +1481,60 @@ mod real {
             for s in members {
                 self.free_slot(s);
             }
+        }
+
+        /// Admit gate+up+down as one unit, evicting the coldest NOT-IN-USE
+        /// group unconditionally (no heat comparison). Prefill uses this so
+        /// its working set stays resident across chunks even when the warm
+        /// census filled the pool with higher-heat triples; decode keeps the
+        /// census path (maybe_insert_triple) which preserves the hot set.
+        fn maybe_insert_triple_force(
+            &mut self,
+            parts: &[(u64, &[u8]); 3],
+            in_use: &[u64],
+        ) -> Result<Option<[*const std::ffi::c_void; 3]>> {
+            let mut ptrs = [std::ptr::null(); 3];
+            let mut need: Vec<(usize, u64, &[u8])> = Vec::new();
+            for (i, &(off, payload)) in parts.iter().enumerate() {
+                if let Some(p) = self.map.get(&off).map(|&s| self.slot_ptr(s)) {
+                    ptrs[i] = p;
+                } else {
+                    need.push((i, off, payload));
+                }
+            }
+            if need.is_empty() {
+                return Ok(Some(ptrs));
+            }
+            // free enough slots: round-robin over occupied slots, skipping
+            // in_use, O(1) per victim (no sort). If nothing is evictable,
+            // fall back to None.
+            let n = self.meta.len();
+            let mut scanned = 0;
+            while self.free_list.len() < need.len() && scanned < n {
+                let slot = self.ring_next % n;
+                self.ring_next += 1;
+                scanned += 1;
+                if self.meta[slot].1 != u64::MAX && !in_use.contains(&self.meta[slot].1) {
+                    self.free_group_of(slot as u32);
+                    scanned = 0;
+                }
+            }
+            if self.free_list.len() < need.len() {
+                return Ok(None);
+            }
+            let gid = self.next_group;
+            self.next_group = self.next_group.wrapping_add(1).max(1);
+            for (j, (i, off, payload)) in need.iter().enumerate() {
+                let slot = self.free_list.pop().ok_or("triple force: free_list empty")?;
+                let base = slot as usize * self.slab_bytes;
+                self.pool.write(base, payload)?;
+                let freq = self.touch.get(off).map(|t| t.0).unwrap_or(0);
+                debug_assert_eq!(self.meta[slot as usize].1, u64::MAX);
+                self.meta[slot as usize] = (freq, *off, gid);
+                self.map.insert(*off, slot);
+                ptrs[*i] = self.slot_ptr(slot);
+            }
+            Ok(Some(ptrs))
         }
 
         fn get(&mut self, offset: u64, len: u64) -> Option<*const std::ffi::c_void> {
@@ -4338,7 +4395,7 @@ mod real {
 
     /// Cross-layer expert H2D prefetch: slabs already copied into `staging_alt`
     /// (or primary staging when parity flips) for the predicted next MoE layer.
-    struct ExpertH2dPrefetch {
+    pub(crate) struct ExpertH2dPrefetch {
         /// layer index the prefetch was built for
         layer: usize,
         /// offset -> device pointer inside the alt staging buffer

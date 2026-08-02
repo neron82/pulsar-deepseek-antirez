@@ -196,6 +196,9 @@ mod real {
         if ret == 0 {
             Ok(())
         } else {
+            if std::env::var_os("PULSAR_VERBOSE").is_some() {
+                eprintln!("pulsar: CUDA call {op} failed with raw ret {ret}");
+            }
             Err(Error(op))
         }
     }
@@ -399,9 +402,12 @@ mod real {
         pub fn alloc(bytes: usize) -> Result<Self> {
             ensure_device();
             let mut ptr = std::ptr::null_mut();
+            if std::env::var_os("PULSAR_VERBOSE").is_some() && bytes >= 16 << 20 {
+                eprintln!("pulsar: alloc {:.3} GB on device {}", bytes as f64 / 1e9, get_device());
+            }
             if let Err(e) = check_rt(unsafe { cudaMalloc(&mut ptr, bytes.max(1)) }, "cudaMalloc") {
                 eprintln!(
-                    "pulsar: cudaMalloc({:.2} GB) failed on device {}",
+                    "pulsar: cudaMalloc({:.2} GB) failed on device {}: {e}",
                     bytes as f64 / 1e9,
                     get_device()
                 );
