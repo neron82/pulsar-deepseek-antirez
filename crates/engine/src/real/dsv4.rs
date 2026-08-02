@@ -1635,7 +1635,15 @@ impl Model {
         // just misses and streams normally next call). The DMA runs hidden
         // behind layer il+1's attention + router host time (~9.5s/layer),
         // so the transfers the nsys trace attributed 8.1s to stop blocking.
-        if std::env::var_os("PULSAR_H2D_PREFETCH").is_some()
+        // BROKEN (2026-08-02): layer-crossing prefetch prediction is
+        // INCORRECT. The heuristic "layer N's selected experts == layer N+1's"
+        // is false per-token — MoE routing differs between layers, so the
+        // drain accepts weights from the WRONG layer and produces garbage
+        // logits (measured: ids [0,0,0,...] with prefetch on vs correct
+        // [455,...] off). MLA's prefetch works only because decode predicts
+        // the next token deterministically (MTP); prefill has no such source.
+        // Kept only for analysis; DO NOT enable.
+        if false && std::env::var_os("PULSAR_H2D_PREFETCH").is_some()
             && st.async_expert_h2d
             && n_tok > 1
             && il + 1 < self.layers.len()
