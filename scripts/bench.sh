@@ -1,44 +1,26 @@
-#!/usr/bin/env bash
-# Standardized decode benchmark. README numbers come from this script and
-# nowhere else. Protocol (learned the hard way, 2026-07-15):
-#   - warm census: tier placement ranks from the .warm popularity file, so
-#     the first run after a census wipe is NOT a benchmark
-#   - n=64 sustained: short runs read high (per-token SSD miss rate is
-#     still climbing toward steady state)
-#   - second warm run is the canonical number
-#   - quiet box: streaming decode is disk-bound, a busy box reads ~20% low
-#
-# COMPARING TWO BUILDS: consecutive runs are NOT independent samples. The
-# census and the resident tier keep warming across runs, so later runs read
-# systematically faster - measured 2.56 -> 2.83 tok/s on GLM-5.2 from the
-# SAME binary half an hour apart (tier 2812 -> 3023 slots, vram hits
-# 14% -> 19%). Never compare build A's runs against build B's runs taken
-# earlier; that is how a neutral change looks like a win or a regression.
-# Build both binaries, then ALTERNATE them (base, new, base, new, ...) so
-# the warming trend lands on both equally, and compare the means.
-#
-# usage: bench.sh MODEL.gguf [N]
-set -euo pipefail
+#!/bin/bash
+# Sustained-decode benchmark for pulsar-ds4flash + DeepSeek-V4-Flash-0731
+# Warm-run protocol per the README: first run fills the census, second run measures.
+set -u
+MODEL_DIR="${1:-/home/neron/models/deepseek-v4-0731/UD-Q2_K_XL}"
+SHARD1="$MODEL_DIR/DeepSeek-V4-Flash-0731-UD-Q2_K_XL-00001-of-00003.gguf"
+BIN=/home/neron/projects/pulsar-ds4flash/target/release/pulsar-cli
+CTX="${2:-8192}"
 
-MODEL=${1:?usage: bench.sh MODEL.gguf [N]}
-N=${2:-64}
-CLI=${CLI:-./target/release/pulsar-cli}
-PROMPT="The three most important inventions of the twentieth century were"
+echo "=== benchmark: pulsar-ds4flash + DS-V4-Flash-0731 UD-Q2_K_XL ==="
+echo "model: $SHARD1"
+echo "ctx:   $CTX"
+nvidia-smi --query-gpu=index,name,memory.used,memory.total --format=csv,noheader
 
-load=$(awk '{print $1}' /proc/loadavg)
-if awk -v l="$load" 'BEGIN{exit !(l > 1.5)}'; then
-    echo "bench: WARNING 1-min load is ${load}; numbers will read low" >&2
-fi
+# Warm run (fills census, hot cache, tiers) - short
+echo ""
+echo "--- warm run (n=32) ---"
+timeout 300 env PULSAR_CPU=1 PULSAR_DEV_CACHE_GB=4 "$BIN" -m "$SHARD1" -p "The capital of France is" -n 32 --ctx "$CTX" --temp 0 2>&1 | tail -3
 
-if [ ! -f "${MODEL}.warm" ]; then
-    echo "bench: no census, cold run to build one (number discarded)"
-    "$CLI" -m "$MODEL" --ctx 512 -p "$PROMPT" -n "$N" --temp 0 2>&1 \
-        | grep "tok/s" | sed 's/^/  cold: /'
-fi
-
-echo "bench: warm run 1"
-"$CLI" -m "$MODEL" --ctx 512 -p "$PROMPT" -n "$N" --temp 0 2>&1 \
-    | grep "tok/s" | sed 's/^/  /'
-echo "bench: warm run 2 (canonical)"
-"$CLI" -m "$MODEL" --ctx 512 -p "$PROMPT" -n "$N" --temp 0 2>&1 \
-    | grep "tok/s" | sed 's/^/  /'
+# Sustained benchmark: n=64 (README standard), repeat 3x for variance
+echo ""
+echo "--- sustained runs (n=64) ---"
+for run in 1 2 3; do
+  echo "run $run:"
+  timeout 600 env PULSAR_CPU=1 PULSAR_DEV_CACHE_GB=4 "$BIN" -m "$SHARD1" -p "The quick brown fox jumps over the lazy dog. The capital of France is" -n 64 --ctx "$CTX" --temp 0 2>&1 | grep -E "^pulsar:|^Paris|tok/s"
+done

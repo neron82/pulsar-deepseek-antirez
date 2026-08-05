@@ -86,8 +86,10 @@ __global__ static void dsv4_attention_kernel(
     const float *qh = q + (uint64_t)h * head_dim;
     const uint32_t tid = threadIdx.x;
     __shared__ float sq[512];
-    __shared__ float s_w[128];
-    __shared__ float red[128];
+    __shared__ float s_w[2][128]; /* double-buffered per chunk parity */
+    __shared__ float wmax[2][4];  /* warp-max scratch (shuffle reduce), parity-buffered */
+    __shared__ unsigned warp_vis[4]; /* per-warp visible-row ballots */
+    __shared__ unsigned crow[2][128]; /* compacted visible-row list, parity-buffered */
     for (uint32_t d = tid; d < head_dim; d += 128u) sq[d] = qh[d];
     __syncthreads();
 
@@ -97,6 +99,7 @@ __global__ static void dsv4_attention_kernel(
     float den = 1.0f;
     uint32_t n_total = n_raw + n_comp;
     for (uint32_t base = 0; base < n_total; base += 128u) {
+        uint32_t p = (base >> 7u) & 1u; /* chunk parity for the double buffers */
         uint32_t chunk = n_total - base < 128u ? n_total - base : 128u;
         float s = -INFINITY;
         const float *srow = NULL;
@@ -113,34 +116,77 @@ __global__ static void dsv4_attention_kernel(
                 s = dot * scale;
             }
         }
-        red[tid] = s;
-        __syncthreads();
-        for (uint32_t st = 64u; st != 0; st >>= 1u) {
-            if (tid < st) red[tid] = fmaxf(red[tid], red[tid + st]);
-            __syncthreads();
+        // Warp-shuffle max reduce (bit-exact for finite non-NaN scores:
+        // fmaxf is associative/commutative on this domain, and any +-0.0
+        // sign difference cancels through expf(+-0.0)=1.0 downstream).
+        // NOTE: leaders write a SEPARATE array (wmax) — writing into a
+        // red[] shared by data would race with threads' red[tid]=s writes.
+        // Scores for tid >= chunk stay -INFINITY; the shuffle reduce
+        // covers all 128 threads, matching the old tree's -INF entries.
+        {
+            float v = s;
+            #pragma unroll
+            for (uint32_t off = 16u; off != 0u; off >>= 1u) {
+                v = fmaxf(v, __shfl_xor_sync(0xffffffffu, v, off));
+            }
+            if ((tid & 31u) == 0u) wmax[p][tid >> 5u] = v;
         }
-        float m_new = fmaxf(m, red[0]);
+        __syncthreads();
+        // m_new redundant per thread: same inputs, same serial order ->
+        // bit-identical across threads. (barrier above makes wmax[p][0..3]
+        // visible; no barrier needed after: m_new is register-local.)
+        float m_new = fmaxf(fmaxf(wmax[p][0], wmax[p][1]), fmaxf(wmax[p][2], wmax[p][3]));
+        m_new = fmaxf(m, m_new);
         float corr = expf(m - m_new);
         #pragma unroll
         for (uint32_t k = 0; k < 4; k++) acc[k] *= corr;
         den *= corr;
-        if (tid < chunk) s_w[tid] = s == -INFINITY ? 0.0f : expf(s - m_new);
-        __syncthreads();
-        for (uint32_t r = 0; r < chunk; r++) {
-            float w = s_w[r];
-            if (w == 0.0f) continue;
-            uint32_t row = base + r;
-            const float *vrow = row < n_raw
-                ? raw + (uint64_t)row * head_dim
-                : comp + (uint64_t)(row - n_raw) * head_dim;
-            den += w;
-            for (uint32_t d = tid, k = 0; d < head_dim; d += 128u, k++) {
-                acc[k] += w * vrow[d];
+        if (tid < chunk) s_w[p][tid] = s == -INFINITY ? 0.0f : expf(s - m_new);
+        // NO barrier here: s_w[p][tid] is only read by its own thread at
+        // the vis ballot below; cross-thread s_w reads happen after the
+        // crow barrier.
+        // Value accumulation over the VISIBLE rows only, in ascending
+        // order (bit-exact by construction: the original loop `continue`s
+        // on w == 0.0f, doing zero float ops for hidden rows, so dropping
+        // them changes nothing — same rows, same order, same ops. Unlike
+        // dense-buffer compaction, chunk boundaries are untouched, so the
+        // max/den/acc reduction order is identical).
+        {
+            unsigned vis = (tid < chunk) && (s_w[p][tid] != 0.0f);
+            unsigned b = __ballot_sync(0xffffffffu, vis);
+            if ((tid & 31u) == 0u) warp_vis[tid >> 5u] = b;
+            __syncthreads();
+            unsigned warp = tid >> 5u;
+            unsigned pre = 0u;
+            for (uint32_t w = 0u; w < warp; w++) pre += __popc(warp_vis[w]);
+            if (vis) {
+                unsigned lane = tid & 31u;
+                unsigned rank = pre + __popc(b & ((1u << lane) - 1u));
+                crow[p][rank] = tid;
+            }
+            __syncthreads();
+            unsigned n_vis = pre + __popc(b);
+            for (uint32_t r = 0u; r < n_vis; r++) {
+                uint32_t rr = crow[p][r];
+                float w = s_w[p][rr];
+                uint32_t row = base + rr;
+                const float *vrow = row < n_raw
+                    ? raw + (uint64_t)row * head_dim
+                    : comp + (uint64_t)(row - n_raw) * head_dim;
+                den += w;
+                for (uint32_t d = tid, k = 0; d < head_dim; d += 128u, k++) {
+                    acc[k] += w * vrow[d];
+                }
             }
         }
         m = m_new;
-        __syncthreads();
+        // NO end-of-loop barrier: the parity buffers make the next
+        // chunk's writes land in the OTHER buffer half, so a slow thread
+        // still reading this chunk's crow/s_w cannot collide with a fast
+        // thread's next-chunk writes. (The final __syncthreads below
+        // covers the last chunk's reads before out[] is written.)
     }
+    __syncthreads();
     for (uint32_t d = tid, k = 0; d < head_dim; d += 128u, k++) {
         out[(uint64_t)h * head_dim + d] = acc[k] / den;
     }
@@ -165,7 +211,8 @@ extern "C" int pulsar_dsv4_attention(
     dsv4_attention_kernel<<<n_head, 128>>>(
             (float *)out_dev, (const float *)q_dev, (const float *)raw_dev,
             n_raw, (const float *)comp_dev, n_comp,
-            (const uint8_t *)allowed_dev, (const float *)sinks_dev,
+            (const uint8_t *)allowed_dev,
+            (const float *)sinks_dev,
             head_dim, scale);
     return cuda_ok(cudaGetLastError(), "dsv4 attention launch");
 }

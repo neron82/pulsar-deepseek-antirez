@@ -227,6 +227,63 @@ __global__ static void idx_score_one_kernel(
     if (threadIdx.x == 0) scores[row] = score;
 }
 
+/* dsv4 indexer scores: f32 cache rows (QAT'd + f16-rounded, one f32
+ * head_dim row per compressed slot), query pre-processed (rope+QAT)
+ * on the host before launch. One block per row. BIT-EXACT with the
+ * host indexer_allowed: products in dim order, sequential f32 sum in
+ * dim order (0..head_dim-1), score accumulation in head order with
+ * max(0,dot)*w[h]*scale left-assoc — same rounding as the host loop,
+ * so the top-k selection cannot flip on float order. head_dim <= 128. */
+__global__ static void dsv4_idx_scores_one_kernel(
+        float *scores, const float *q, const float *weights,
+        const float *cache, uint32_t n_rows, uint32_t n_head,
+        uint32_t head_dim, float scale) {
+    const uint32_t row = blockIdx.x;
+    if (row >= n_rows) return;
+    __shared__ float prod[128];
+    const float *crow = cache + (uint64_t)row * head_dim;
+    const uint32_t tid = threadIdx.x;
+    float score = 0.0f;
+    for (uint32_t h = 0; h < n_head; h++) {
+        const float *qh = q + (uint64_t)h * head_dim;
+        if (tid < head_dim) prod[tid] = qh[tid] * crow[tid];
+        __syncthreads();
+        if (tid == 0) {
+            // Match the host reference EXACTLY: Rust f32 sum does a
+            // separate rounding per add, and the score accumulation
+            // `(max(dot,0)*w)*scale + s` is three roundings. NVCC's
+            // default fmad=true would contract the last step into an
+            // fmaf (one rounding) and the per-element adds into
+            // fmaf(qh*crow + acc) chains — both flip 1-ulp scores at
+            // the top-k boundary. Force RN intrinsics so the kernel is
+            // bit-identical to the host reference.
+            float dot = 0.0f;
+            for (uint32_t d = 0; d < head_dim; d++) {
+                dot = __fadd_rn(dot, prod[d]);
+            }
+            float contrib = __fmul_rn(__fmul_rn(fmaxf(dot, 0.0f), weights[h]), scale);
+            score = __fadd_rn(score, contrib);
+        }
+        __syncthreads();
+    }
+    if (tid == 0) scores[row] = score;
+}
+
+extern "C" int pulsar_dsv4_idx_scores_one(
+        void *scores_dev, const void *q_dev, const void *weights_dev,
+        const void *cache_dev, uint32_t n_rows, uint32_t n_head,
+        uint32_t head_dim, float scale) {
+    if (!scores_dev || !q_dev || !weights_dev || !cache_dev ||
+        n_rows == 0 || n_head == 0 || head_dim == 0 || head_dim > 128u) {
+        return 0;
+    }
+    dsv4_idx_scores_one_kernel<<<n_rows, 128>>>(
+            (float *)scores_dev, (const float *)q_dev,
+            (const float *)weights_dev, (const float *)cache_dev,
+            n_rows, n_head, head_dim, scale);
+    return cuda_ok(cudaGetLastError(), "dsv4 idx scores one launch");
+}
+
 extern "C" int pulsar_idx_score_one(
         void *scores_dev, const void *q_dev, const void *weights_dev,
         const void *key_cache_dev, uint32_t n_rows, uint32_t n_head,

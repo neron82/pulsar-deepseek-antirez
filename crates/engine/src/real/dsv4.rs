@@ -617,6 +617,9 @@ pub(super) struct Dsv4Prof {
     pub loop_raw: std::time::Duration,     // per-token loop, ratio==0 layers
     pub loop_comp: std::time::Duration,    // per-token loop, ratio!=0 (no idx)
     pub loop_idx: std::time::Duration,     // per-token loop, ratio==4 (idx+syncs)
+    pub idx_host: std::time::Duration,     // indexer_allowed host scoring + sort
+    pub idx_d2h: std::time::Duration,      // per-emit idx_cache read_f32_at syncs
+    pub idx_comp: std::time::Duration,     // idx dsv4_comp_step launches
     pub loop_att: std::time::Duration,     // per-token attention_at kernels
     pub moe_resolve: std::time::Duration,  // dsv4_moe: distinct/tiers/store
     pub moe_kernels: std::time::Duration,  // dsv4_moe: GPU launches
@@ -638,6 +641,16 @@ pub(super) struct Dsv4Rt {
     idx_sc: DeviceBuf,
     idx_w: DeviceBuf,  // [T][n_idx_head] indexer proj
     allowed: DeviceBuf, // [comp cap] u8 visibility mask
+    /// GPU indexer-scoring scratch: prepped query [n_idx_head*n_idx_dim]
+    /// and scores [idx cap] f32 (PULSAR_NO_GPU_IDX restores the host path).
+    idx_q_prep: DeviceBuf,
+    idx_scores: DeviceBuf,
+    /// ring snapshots for the batched (deferred) mask path: the raw SWA
+    /// ring is mutated in-loop by later tokens, so a deferred attention
+    /// must read the window AS OF its own position. Each masked token's
+    /// window (n_raw <= n_swa rows) is D2D-copied here at record time;
+    /// slot stride = n_swa * head_dim floats.
+    idx_ring_snap: DeviceBuf,
     /// device Sinkhorn coefficient buffers [6*n_hc] (attn / ffn halves)
     coef_attn: DeviceBuf,
     coef_ffn: DeviceBuf,
@@ -685,7 +698,17 @@ impl Dsv4Rt {
             idx_kv: DeviceBuf::alloc(T_MAX * 2 * s.n_idx_dim.max(1) as usize * 4)?,
             idx_sc: DeviceBuf::alloc(T_MAX * 2 * s.n_idx_dim.max(1) as usize * 4)?,
             idx_w: DeviceBuf::alloc(T_MAX * s.n_idx_head.max(1) as usize * 4)?,
-            allowed: DeviceBuf::alloc(max_ratio_cap)?,
+            // BATCHED MASK PATH: per-token packed scratch (one readback
+            // for all deferred masks instead of one blocking D2H per
+            // masked token). allowed: T_MAX packed masks of
+            // max_ratio_cap bytes; idx_q_prep: T_MAX prepped queries;
+            // idx_scores: T_MAX packed score regions (each <=
+            // max_ratio_cap f32).
+            allowed: DeviceBuf::alloc(T_MAX * max_ratio_cap)?,
+            // 1 byte per 128-row comp chunk per token (max_ratio_cap/128)
+            idx_q_prep: DeviceBuf::alloc(T_MAX * (s.n_idx_head * s.n_idx_dim).max(1) as usize * 4)?,
+            idx_scores: DeviceBuf::alloc(T_MAX * max_ratio_cap * 4)?,
+            idx_ring_snap: DeviceBuf::alloc(T_MAX * (s.n_swa.max(1) as usize * s.head_dim as usize * 4))?,
             coef_attn: DeviceBuf::alloc(T_MAX * 6 * s.n_hc as usize * 4)?,
             coef_ffn: DeviceBuf::alloc(T_MAX * 6 * s.n_hc as usize * 4)?,
             layers,
@@ -771,6 +794,7 @@ fn indexer_allowed(q: &mut [f32], weights: &[f32], idx_cache: &[f32], n_comp: us
     if n_comp <= top_k {
         return None;
     }
+    let t0 = std::time::Instant::now();
     rope_tail_host(q, n_head, head_dim, n_rot, pos, rope);
     for h in 0..n_head {
         qat_row(&mut q[h * head_dim..(h + 1) * head_dim]);
@@ -800,6 +824,37 @@ fn indexer_allowed(q: &mut [f32], weights: &[f32], idx_cache: &[f32], n_comp: us
     let mut allowed = vec![0u8; n_comp];
     for &c in &order[..top_k] {
         allowed[c as usize] = 1;
+    }
+    if std::env::var_os("PULSAR_IDX_PROBE").is_some() && (2048..2112).contains(&pos) {
+        // per-row cache fingerprint at the probe position: localizes
+        // device-vs-mirror divergence (identical q/w + identical cache
+        // must yield identical scores)
+        if pos == 2059 {
+            let nd = head_dim;
+            for r in 0..n_comp {
+                let mut h = 0u64;
+                for &v in &idx_cache[r * nd..(r + 1) * nd] {
+                    h = h.wrapping_mul(1099511628211).wrapping_add(v.to_bits() as u64);
+                }
+                eprintln!("hrow pos={pos} r={r} h={h:x}");
+            }
+        }
+        // input fingerprint: hashes of q and weights
+        let qh: u64 = q.iter().fold(0u64, |h, x| h.wrapping_mul(1099511628211).wrapping_add(x.to_bits() as u64));
+        let wh: u64 = weights.iter().fold(0u64, |h, x| h.wrapping_mul(1099511628211).wrapping_add(x.to_bits() as u64));
+        // score fingerprint: max, argmax, min, nan-count
+        let (mut mx, mut mn) = (f32::NEG_INFINITY, f32::INFINITY);
+        let (mut ax, mut an) = (0usize, 0usize);
+        let mut nans = 0;
+        for (c, &s) in scores.iter().enumerate() {
+            if s.is_nan() { nans += 1; }
+            if s > mx { mx = s; ax = c; }
+            if s < mn { mn = s; an = c; }
+        }
+        eprintln!(
+            "hostprobe pos={pos} n_comp={n_comp} qh={qh:x} wh={wh:x} max={mx:e}@row{ax} min={mn:e}@row{an} nans={nans} first={:e} last={:e}",
+            scores[0], scores[n_comp - 1]
+        );
     }
     Some(allowed)
 }
@@ -891,9 +946,11 @@ impl Model {
             let total = s(rt.prof.attn_kernels) + s(rt.prof.attn_token) + s(rt.prof.ffn_pre)
                 + s(rt.prof.route) + s(rt.prof.moe_kernels) + s(rt.prof.sync);
             eprintln!(
-                "pulsar: dsv4 prefill profile: attn-kernels {:.3}s, attn-token-loop {:.3}s (raw {:.3}s + comp {:.3}s + idx {:.3}s + att {:.3}s), ffn-pre {:.3}s, route {:.3}s (read {:.3}s + host {:.3}s), moe-kernels {:.3}s, sync {:.3}s (sum {:.3}s)",
+                "pulsar: dsv4 prefill profile: attn-kernels {:.3}s, attn-token-loop {:.3}s (raw {:.3}s + comp {:.3}s + idx {:.3}s (comp {:.3}s + d2h {:.3}s + host {:.3}s) + att {:.3}s), ffn-pre {:.3}s, route {:.3}s (read {:.3}s + host {:.3}s), moe-kernels {:.3}s, sync {:.3}s (sum {:.3}s)",
                 s(rt.prof.attn_kernels), s(rt.prof.attn_token),
-                s(rt.prof.loop_raw), s(rt.prof.loop_comp), s(rt.prof.loop_idx), s(rt.prof.loop_att),
+                s(rt.prof.loop_raw), s(rt.prof.loop_comp), s(rt.prof.loop_idx),
+                s(rt.prof.idx_comp), s(rt.prof.idx_d2h), s(rt.prof.idx_host),
+                s(rt.prof.loop_att),
                 s(rt.prof.ffn_pre),
                 s(rt.prof.route), s(rt.prof.route_read), s(rt.prof.route_host),
                 s(rt.prof.moe_kernels), s(rt.prof.sync), total
@@ -1016,6 +1073,21 @@ impl Model {
         // once per chunk when selection can fire inside it
         let mut idx_q_host: Vec<f32> = Vec::new();
         let mut idx_w_host: Vec<f32> = Vec::new();
+        // BATCHED MASK PATH (GPU scorer): deferred masked tokens are
+        // recorded in-loop; masks + attentions are computed after the
+        // loop in ONE batch (prep -> single H2D -> all score kernels ->
+        // single D2H -> host top-k -> packed mask H2D -> deferred
+        // attention launches). Kills the per-token blocking D2H/H2D
+        // stream drains (measured ~6ms each; 22s of the 66s idx timer).
+        let use_gpu_idx = std::env::var_os("PULSAR_NO_GPU_IDX").is_none();
+        // BATCHED MASK PATH (GPU scorer): deferred masked tokens are
+        // recorded in-loop (token index + n_idx_comp frozen at their
+        // position); masks + attentions are computed after the loop in
+        // ONE batch. Kills the per-token blocking D2H/H2D stream drains
+        // (measured ~6ms each; 22s of the 66s idx timer).
+        let mut idx_mask_i: Vec<u32> = Vec::new();
+        let mut idx_mask_ncomp: Vec<u32> = Vec::new();
+        let mut idx_mask_comp_n: Vec<u32> = Vec::new();
         // The visibility mask only fires once n_idx_comp exceeds
         // n_idx_topk. Within a chunk that caps at start + ceil(t/ratio),
         // so when the cap stays under top_k the per-emit host mirror is
@@ -1072,6 +1144,7 @@ impl Model {
             if let Some(idx) = &w.idx {
                 let lrt = &mut rt.layers[il];
                 let lane = lrt.idx.as_mut().ok_or("indexer state missing")?;
+                let t_ic = std::time::Instant::now();
                 kernels::dsv4_comp_step(
                     &mut lane.st_kv, &mut lane.st_sc,
                     &mut lrt.idx_cache, lrt.n_idx_comp as usize * s.n_idx_dim as usize * 4,
@@ -1079,17 +1152,41 @@ impl Model {
                     &idx.comp.ape, &idx.comp.norm,
                     idx.comp.width, s.n_idx_dim, lane.ratio, pos, emit, true, eps, &rope,
                 )?;
+                rt.prof.idx_comp += t_ic.elapsed();
                 if emit {
                     lrt.n_idx_comp += 1;
-                    if idx_mask_can_fire {
+                    // Host mirror is only consumed by the host scoring
+                    // path; GPU mode scores straight off the device cache
+                    // so the per-emit D2H read is pure overhead.
+                    if idx_mask_can_fire && std::env::var_os("PULSAR_NO_GPU_IDX").is_some() {
                         let nd = s.n_idx_dim as usize;
+                        let t_d = std::time::Instant::now();
                         let row = lrt.idx_cache.read_f32_at((lrt.n_idx_comp as usize - 1) * nd, nd)?;
+                        rt.prof.idx_d2h += t_d.elapsed();
                         lrt.idx_cache_host.extend_from_slice(&row);
                     }
                 }
             }
             // visibility mask for THIS token once the compressed set
-            // exceeds the top-k budget
+            // exceeds the top-k budget. GPU path: host preps the query
+            // (rope+QAT, identical math to indexer_allowed) then the
+            // scores kernel runs over the device cache (bit-exact: same
+            // dim-order products, sequential f32 sum, head-order max
+            // accumulation); host top-k picks the mask. The host cache
+            // mirror is skipped entirely, killing the 2.5ms/call scalar
+            // scoring loop (81.9s of 177s prefill at 3.2k ctx; quadratic
+            // in context). PULSAR_NO_GPU_IDX restores the host path.
+            //
+            // BATCHED MASK PATH (GPU only): the per-token blocking
+            // scores readback drains the whole stream (measured ~6ms
+            // per masked token; 22s of the 66s idx timer at 3.2k ctx).
+            // So in-loop we only RECORD the request (token index +
+            // frozen n_idx_comp) and defer the attention launch; after
+            // the loop ONE batch scores all tokens, computes all masks
+            // on host (bit-identical: same scores, same sort, same
+            // tie-break, same top-k set; comp rows are append-only so
+            // each token's n_idx_comp is frozen at its position) and
+            // launches the deferred attentions in original i order.
             let mut masked = false;
             if w.idx.is_some() && !idx_q_host.is_empty() {
                 let lrt = &rt.layers[il];
@@ -1098,24 +1195,69 @@ impl Model {
                     let nh = s.n_idx_head as usize;
                     let q = &mut idx_q_host[i * qw..(i + 1) * qw];
                     let wgt = &idx_w_host[i * nh..(i + 1) * nh];
-                    if let Some(mask) = indexer_allowed(
-                        q,
-                        wgt,
-                        &lrt.idx_cache_host,
-                        lrt.n_idx_comp as usize,
-                        nh,
-                        s.n_idx_dim as usize,
-                        s.n_idx_topk as usize,
-                        pos,
-                        &rope,
-                        s.rot_dim as usize,
-                    ) {
-                        if std::env::var_os("PULSAR_MASK_LOG").is_some() {
-                            let h: u64 = mask.iter().enumerate().filter(|(_, &m)| m == 1).map(|(c, _)| c as u64 * 2654435761).fold(0u64, u64::wrapping_add);
-                            eprintln!("mask L{il} @{pos} n={} h={h:x}", mask.len());
-                        }
-                        rt.allowed.write(0, &mask)?;
+                    let t_h = std::time::Instant::now();
+                    if use_gpu_idx {
+                        // record; mask computed in the post-loop batch.
+                        // ALSO snapshot the raw SWA ring window NOW: the
+                        // ring is mutated in-loop by later tokens, so a
+                        // deferred attention at end-of-chunk would read
+                        // FUTURE tokens for n_raw == n_swa (causal
+                        // violation — the first masked token's corrupted
+                        // attention cascades into every downstream row).
+                        let snap_k = idx_mask_i.len();
+                        let snap_stride = s.n_swa.max(1) as usize * s.head_dim as usize * 4;
+                        let n_raw_snap = ((pos + 1).min(s.n_swa)) as usize;
+                        kernels::copy_d2d(
+                            &mut rt.idx_ring_snap,
+                            snap_k * snap_stride,
+                            &st.kcache[il],
+                            0,
+                            n_raw_snap * s.head_dim as usize * 4,
+                        )?;
+                        idx_mask_i.push(i as u32);
+                        idx_mask_ncomp.push(lrt.n_idx_comp);
+                        idx_mask_comp_n.push(rt.layers[il].n_comp);
+                        let _ = (q, wgt);
+                        rt.prof.idx_host += t_h.elapsed();
                         masked = true;
+                    } else {
+                        // host oracle: also fingerprint the DEVICE cache
+                        // rows (not just the mirror) so we can tell a
+                        // stale mirror from a real cascade divergence.
+                        if std::env::var_os("PULSAR_IDX_PROBE").is_some() && pos == 2059 {
+                            let nd = s.n_idx_dim as usize;
+                            let rows = lrt.idx_cache.read_f32_at(0, lrt.n_idx_comp as usize * nd)?;
+                            for (r, chunk) in rows.chunks_exact(nd).enumerate() {
+                                let mut h = 0u64;
+                                for &v in chunk {
+                                    h = h.wrapping_mul(1099511628211).wrapping_add(v.to_bits() as u64);
+                                }
+                                eprintln!("dhrow pos={pos} r={r} h={h:x}");
+                            }
+                        }
+                        let mask = indexer_allowed(
+                            q,
+                            wgt,
+                            &lrt.idx_cache_host,
+                            lrt.n_idx_comp as usize,
+                            nh,
+                            s.n_idx_dim as usize,
+                            s.n_idx_topk as usize,
+                            pos,
+                            &rope,
+                            s.rot_dim as usize,
+                        );
+                        if let Some(mask) = mask {
+                            rt.prof.idx_host += t_h.elapsed();
+                            if std::env::var_os("PULSAR_MASK_LOG").is_some() {
+                                let h: u64 = mask.iter().enumerate().filter(|(_, &m)| m == 1).map(|(c, _)| c as u64 * 2654435761).fold(0u64, u64::wrapping_add);
+                                eprintln!("mask L{il} @{pos} n={} h={h:x}", mask.len());
+                            }
+                            rt.allowed.write(0, &mask)?;
+                            masked = true;
+                        } else {
+                            rt.prof.idx_host += t_h.elapsed();
+                        }
                     }
                 }
             }
@@ -1135,28 +1277,269 @@ impl Model {
             }
             let n_comp = rt.layers[il].n_comp;
             let t_att_at = std::time::Instant::now();
-            kernels::dsv4_attention_at(
-                &mut st.heads,
-                i * q_dim as usize * 4,
-                &st.q,
-                i * q_dim as usize * 4,
-                &st.kcache[il],
-                n_raw,
-                (n_comp > 0).then_some(&st.vcache[il]),
-                n_comp,
-                if masked { Some(&rt.allowed) } else { None },
-                &w.sinks,
-                s.n_head,
-                s.head_dim,
-                1.0 / (s.head_dim as f32).sqrt(),
-            )?;
+            if use_gpu_idx {
+                // GPU path: masked tokens defer to the post-loop batch
+                // (their attention launches after ALL scores/masks are
+                // computed). Unmasked tokens run here with no mask.
+                if !masked {
+                    kernels::dsv4_attention_at(
+                        &mut st.heads,
+                        i * q_dim as usize * 4,
+                        &st.q,
+                        i * q_dim as usize * 4,
+                        &st.kcache[il],
+                        n_raw,
+                        (n_comp > 0).then_some(&st.vcache[il]),
+                        n_comp,
+                        None,
+                        &w.sinks,
+                        s.n_head,
+                        s.head_dim,
+                        1.0 / (s.head_dim as f32).sqrt(),
+                    )?;
+                }
+            } else if masked {
+                // Host path: the mask is already in rt.allowed; run the
+                // attention NOW with the mask (original interleaved
+                // semantics). The post-loop batch is GPU-only.
+                kernels::dsv4_attention_at(
+                    &mut st.heads,
+                    i * q_dim as usize * 4,
+                    &st.q,
+                    i * q_dim as usize * 4,
+                    &st.kcache[il],
+                    n_raw,
+                    (n_comp > 0).then_some(&st.vcache[il]),
+                    n_comp,
+                    Some(&rt.allowed),
+                    &w.sinks,
+                    s.n_head,
+                    s.head_dim,
+                    1.0 / (s.head_dim as f32).sqrt(),
+                )?;
+            } else {
+                kernels::dsv4_attention_at(
+                    &mut st.heads,
+                    i * q_dim as usize * 4,
+                    &st.q,
+                    i * q_dim as usize * 4,
+                    &st.kcache[il],
+                    n_raw,
+                    (n_comp > 0).then_some(&st.vcache[il]),
+                    n_comp,
+                    None,
+                    &w.sinks,
+                    s.n_head,
+                    s.head_dim,
+                    1.0 / (s.head_dim as f32).sqrt(),
+                )?;
+            }
             rt.prof.loop_att += t_att_at.elapsed();
+        }
+        // ---- post-loop batched mask path: ONE H2D (all prepped
+        // queries) -> all score kernels -> ONE D2H -> host top-k per
+        // token -> packed mask H2D -> deferred attention launches in
+        // original i order. Bit-identical to the interleaved path (same
+        // scores, same sort, same tie-break; comp rows are append-only
+        // so each token's n_idx_comp is frozen at its position).
+        if use_gpu_idx && !idx_mask_i.is_empty() {
+            let nh = s.n_idx_head as usize;
+            let nd = s.n_idx_dim as usize;
+            let qw = nh * nd;
+            let scale = 1.0 / (nd as f32 * nh as f32).sqrt();
+            let t_batch = std::time::Instant::now();
+            let lrt = &rt.layers[il];
+            let mut probe_qh: Vec<u64> = Vec::new();
+            let mut probe_wh: Vec<u64> = Vec::new();
+            // idx_cache was allocated at max_ratio_cap * n_idx_dim * 4
+            // (Dsv4Rt::new), so the packed per-token stride is derivable.
+            let cap = lrt.idx_cache.bytes() / (nd.max(1) * 4);
+            let mut score_off = 0usize;
+            let mut q_off = 0usize;
+            let t_prep = std::time::Instant::now();
+            for (k, &i) in idx_mask_i.iter().enumerate() {
+                let n = idx_mask_ncomp[k] as usize;
+                // host prep (bit-exact with indexer_allowed)
+                let q = &mut idx_q_host[i as usize * qw..(i as usize + 1) * qw];
+                let wgt = &idx_w_host[i as usize * nh..(i as usize + 1) * nh];
+                rope_tail_host(q, nh, nd, s.rot_dim as usize, pos0 + i, &rope);
+                for h in 0..nh {
+                    qat_row(&mut q[h * nd..(h + 1) * nd]);
+                }
+                rt.idx_q_prep.write(q_off, kernels::as_bytes(q))?;
+                if std::env::var_os("PULSAR_IDX_PROBE").is_some() && (2048..2060).contains(&(pos0 + i)) {
+                    let qh: u64 = q.iter().fold(0u64, |h, x| h.wrapping_mul(1099511628211).wrapping_add(x.to_bits() as u64));
+                    let wh: u64 = wgt.iter().fold(0u64, |h, x| h.wrapping_mul(1099511628211).wrapping_add(x.to_bits() as u64));
+                    probe_qh.push(qh);
+                    probe_wh.push(wh);
+                    // device-cache row hashes at the probe position: the
+                    // kernel reads THIS buffer, so compare against the
+                    // host mirror's hrow lines.
+                    if pos0 + i == 2059 {
+                        let rows = lrt.idx_cache.read_f32_at(0, n as usize * nd)?;
+                        for (r, chunk) in rows.chunks_exact(nd).enumerate() {
+                            let mut h = 0u64;
+                            for &v in chunk {
+                                h = h.wrapping_mul(1099511628211).wrapping_add(v.to_bits() as u64);
+                            }
+                            eprintln!("bhrow pos={} r={r} h={h:x}", pos0 + i);
+                        }
+                    }
+                }
+                kernels::dsv4_idx_scores_one_batch_at(
+                    &mut rt.idx_scores, score_off,
+                    &rt.idx_q_prep, q_off,
+                    &rt.idx_w, i as usize * nh * 4,
+                    &lrt.idx_cache,
+                    n as u32, s.n_idx_head, s.n_idx_dim, scale,
+                )?;
+                q_off += qw * 4;
+                score_off += cap * 4;
+            }
+            // ONE bulk readback of all scores (contiguous per-token
+            // regions, each padded to cap*4 bytes).
+            let t_readback = std::time::Instant::now();
+            let total = idx_mask_i.len() * cap;
+            let all_scores = rt.idx_scores.read_f32(total)?;
+            // host top-k per token; pack masks into ONE blob so the
+            // per-token allowed.write H2Ds (stream syncs) collapse into
+            // a single H2D. Deferred attentions read at k*cap offsets.
+            // Parallel over tokens: each task runs the IDENTICAL
+            // select_nth_unstable_by on its own scores slice, so the
+            // mask is bit-identical to the serial loop (same comparator,
+            // same order, same mask write). The per-token top-k is O(n)
+            // partition work with zero cross-token dependencies.
+            let mask_blob = std::sync::Mutex::new(vec![0u8; idx_mask_i.len() * cap]);
+            let n_tok_idx = idx_mask_i.len();
+            let topk_threads = std::thread::available_parallelism()
+                .map(|n| n.get().min(8).max(1))
+                .unwrap_or(4);
+            if n_tok_idx >= 32 && topk_threads > 1 {
+                std::thread::scope(|scp| {
+                    let blob = &mask_blob;
+                    let chunk_sz = n_tok_idx.div_ceil(topk_threads);
+                    let ids = &idx_mask_i;
+                    let comps = &idx_mask_ncomp;
+                    let scores_all = &all_scores;
+                    for (tid, start) in (0..n_tok_idx).step_by(chunk_sz).enumerate() {
+                        let _ = tid;
+                        scp.spawn(move || {
+                            let end = (start + chunk_sz).min(n_tok_idx);
+                            for k in start..end {
+                                let i = ids[k];
+                                let n = comps[k] as usize;
+                                let base = k * cap;
+                                let scores = &scores_all[base..base + n];
+                                let mut order: Vec<u32> = (0..n as u32).collect();
+                                let kk = s.n_idx_topk.min(n as u32) as usize;
+                                order.select_nth_unstable_by(kk, |&a, &b| {
+                                    scores[b as usize]
+                                        .partial_cmp(&scores[a as usize])
+                                        .unwrap_or(std::cmp::Ordering::Equal)
+                                        .then(a.cmp(&b))
+                                });
+                                let mut guard = blob.lock().unwrap();
+                                {
+                                    let mask = &mut guard[base..base + n];
+                                    for &c in &order[..kk] {
+                                        mask[c as usize] = 1;
+                                    }
+                                }
+                                let _ = i;
+                            }
+                        });
+                    }
+                });
+            } else {
+                for (k, &i) in idx_mask_i.iter().enumerate() {
+                    let n = idx_mask_ncomp[k] as usize;
+                    let base = k * cap;
+                    let scores = &all_scores[base..base + n];
+                    let mut order: Vec<u32> = (0..n as u32).collect();
+                    let kk = s.n_idx_topk.min(n as u32) as usize;
+                    order.select_nth_unstable_by(kk, |&a, &b| {
+                        scores[b as usize]
+                            .partial_cmp(&scores[a as usize])
+                            .unwrap_or(std::cmp::Ordering::Equal)
+                            .then(a.cmp(&b))
+                    });
+                    let mut guard = mask_blob.lock().unwrap();
+                    {
+                        let mask = &mut guard[base..base + n];
+                        for &c in &order[..kk] {
+                            mask[c as usize] = 1;
+                        }
+                    }
+                    let _ = i;
+                }
+            }
+            let mask_blob = mask_blob.into_inner().unwrap();
+            if std::env::var_os("PULSAR_MASK_LOG").is_some() {
+                for (k, &i) in idx_mask_i.iter().enumerate() {
+                    let n = idx_mask_ncomp[k] as usize;
+                    let base = k * cap;
+                    let mask = &mask_blob[base..base + n];
+                    let h: u64 = mask.iter().enumerate().filter(|(_, m)| **m == 1).map(|(c, _)| c as u64 * 2654435761).fold(0u64, u64::wrapping_add);
+                    let n_empty: usize = mask.chunks(128).filter(|c| c.iter().all(|&m| m == 0)).count();
+                    let n_chunks = mask.len().div_ceil(128);
+                    eprintln!("batch-mask L{il} @{} n={} empty_chunks={}/{} h={h:x}", pos0 + i, n, n_empty, n_chunks);
+                }
+            }
+            if std::env::var_os("PULSAR_IDX_PROBE").is_some() && (2048..2060).contains(&(pos0 + idx_mask_i.first().copied().unwrap_or(0) as u32)) {
+                for (k, &i) in idx_mask_i.iter().enumerate() {
+                    let n = idx_mask_ncomp[k] as usize;
+                    let base = k * cap;
+                    let scores = &all_scores[base..base + n];
+                    let (mut mx, mut mn) = (f32::NEG_INFINITY, f32::INFINITY);
+                    let (mut ax, mut an) = (0usize, 0usize);
+                    for (c, &s) in scores.iter().enumerate() {
+                        if s > mx { mx = s; ax = c; }
+                        if s < mn { mn = s; an = c; }
+                    }
+                    let qh: u64 = probe_qh.get(k).copied().unwrap_or(0);
+                    let wh: u64 = probe_wh.get(k).copied().unwrap_or(0);
+                    eprintln!(
+                        "batchprobe L{il} @{} n={} qh={qh:x} wh={wh:x} max={mx:e}@row{ax} min={mn:e}@row{an} first={:e} s1={:e} s2={:e} last={:e}",
+                        pos0 + i, n, scores[0], scores[1], scores[2], scores[n - 1]
+                    );
+                }
+            }
+            rt.allowed.write(0, &mask_blob)?;
+            // deferred attention launches (masked tokens, original order).
+            // Each attends over its OWN ring snapshot (captured at record
+            // time) because the live ring was mutated in-loop by later
+            // tokens — reading it here would leak future tokens.
+            let snap_stride = s.n_swa.max(1) as usize * s.head_dim as usize * 4;
+            for (k, &i) in idx_mask_i.iter().enumerate() {
+                let pos = pos0 + i;
+                let n_raw = (pos + 1).min(s.n_swa);
+                let n_comp = idx_mask_comp_n[k];
+                kernels::dsv4_attention_at_batch(
+                    &mut st.heads,
+                    i as usize * q_dim as usize * 4,
+                    &st.q,
+                    i as usize * q_dim as usize * 4,
+                    &rt.idx_ring_snap,
+                    k * snap_stride,
+                    n_raw,
+                    (n_comp > 0).then_some(&st.vcache[il]),
+                    n_comp,
+                    Some(&rt.allowed),
+                    k * cap,
+                    &w.sinks,
+                    s.n_head,
+                    s.head_dim,
+                    1.0 / (s.head_dim as f32).sqrt(),
+                )?;
+            }
+            rt.prof.idx_host += t_batch.elapsed();
         }
         // When the visibility mask cannot fire inside this chunk, defer
         // the host mirror to ONE bulk read instead of one blocking D2H
         // per emit (measured: the per-emit syncs cost ~4.5s of the 4.7s
-        // loop time on the 3 indexer layers).
-        if w.idx.is_some() && !idx_mask_can_fire {
+        // loop time on the 3 indexer layers). Host-path only: GPU mode
+        // scores off the device cache, so the bulk mirror is dead work.
+        if w.idx.is_some() && !idx_mask_can_fire && std::env::var_os("PULSAR_NO_GPU_IDX").is_some() {
             let lrt = &mut rt.layers[il];
             if lrt.n_idx_comp > 0 {
                 let all = lrt

@@ -1,6 +1,66 @@
-# Pulsar
+# pulsar-deepseek-antirez
 
 ![pulsar](docs/assets/pulsar-poster.png)
+
+**A speed-optimized fork of [Pulsar](https://github.com/giannisanni/pulsar)**
+tuned for the **DwarfStar build** of **DeepSeek V4 Flash 0731** (antirez
+[ds4](https://github.com/antirez/ds4) weights, `DeepSeek-V4-Flash-0731`
+IQ2XXS imatrix GGUF).
+
+This fork keeps the upstream engine intact — same Rust + CUDA, same
+NVMe-streamed expert architecture, same bit-exactness discipline — and
+adds host/device optimizations measured end-to-end on the DS-V4-Flash-0731
+build.
+
+## Measured speedups (Warpgate: RTX 3090 24GB + RTX 3060 Ti 8GB, 86.7GB
+IQ2XXS imatrix GGUF, `PULSAR_CACHE_GB=85`, 131072 ctx)
+
+| Metric | Baseline (upstream) | This fork | Δ |
+|---|---|---|---|
+| Prefill 117k tokens | 14007.5 s | 7968.1 s | **-43.1%** |
+| Decode @128k | 3.80 tok/s | 6.23 tok/s | **+63.9%** |
+| Prefill 60k tokens (top-k lever only) | 2888.8 s | 2832.2 s | **-1.96%** |
+| Output ids | reference | byte-identical | **bit-exact** |
+
+Every optimization landed behind an A/B gate: batch path vs host oracle,
+77,616 mask comparisons with 0 diffs, dumps byte-identical, generated
+ids identical to the reference build. No float operation was ever
+reordered — everything that changed is deterministic.
+
+### Depth-scaling of the host top-k parallelization (60k run, per 8k bucket)
+
+| Depth | Δ vs baseline |
+|---|---|
+| 0-8k | -0.52% |
+| 8-16k | -1.13% |
+| 16-24k | -1.50% |
+| 24-32k | -1.90% |
+| 32-40k | -2.16% |
+| 40-49k | -2.46% |
+| 49-58k | -2.73% |
+
+The win scales with context depth: the host indexer top-k work grows with
+the compressed-KV capacity, and splitting the 768-token selections over
+scoped threads amortizes exactly there.
+
+## What changed
+
+- **Host top-k parallelization** — the indexer top-k (`select_nth_unstable_by`)
+  per masked token runs on up to 8 scoped threads instead of sequentially;
+  bit-exact by construction (same comparator, same partition, no float ops).
+- **Barrier reduction in attention** — parity double-buffering cut 5
+  `__syncthreads` per chunk to 2 (constant per-chunk win at every depth).
+- **Ballot-compacted attention value loop** — visible rows only, chunk
+  boundaries kept intact so float summation order never changes.
+- **Chunk-skip (all-masked chunks) — measured and REVERTED**: the empty-chunk
+  fraction reaches 35.8% at 65-80k depth, but the skip tax (extra barrier +
+  uniform branch + bitmap read per chunk) costs more than skipping saves
+  (+1.5 to +2.6 s/chunk at every depth tested). Documented in the ledger so
+  it is not re-attempted without a 128k-only measurement.
+- `docs/perf-optimization-ledger.md` — full optimization ledger with wins,
+  failures and verdicts (what worked, what did not, and why).
+
+## Upstream description
 
 An inference engine for giant Mixture-of-Experts models on hardware that
 has no business running them. The routed experts live on NVMe and stream

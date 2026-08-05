@@ -94,6 +94,7 @@ mod real {
         fn pulsar_idx_rope0(x: *mut c_void, n_tok: u32, n_head: u32, head_dim: u32, rot_dim: u32, pos0: u32, n_ctx_orig: u32, freq_base: f32, freq_scale: f32, ext_factor: f32, attn_factor: f32, beta_fast: f32, beta_slow: f32) -> i32;
         fn pulsar_idx_store_k(raw_k: *const c_void, w: *const c_void, b: *const c_void, cache: *mut c_void, pos0: u32, n_tok: u32, cache_cap: u32, head_dim: u32, rot_dim: u32, n_ctx_orig: u32, eps: f32, freq_base: f32, freq_scale: f32, ext_factor: f32, attn_factor: f32, beta_fast: f32, beta_slow: f32, fp8: u32) -> i32;
         fn pulsar_idx_score_one(scores: *mut c_void, q: *const c_void, weights: *const c_void, cache: *const c_void, n_rows: u32, n_head: u32, head_dim: u32, scale: f32, fp8: u32) -> i32;
+        fn pulsar_dsv4_idx_scores_one(scores: *mut c_void, q: *const c_void, weights: *const c_void, cache: *const c_void, n_rows: u32, n_head: u32, head_dim: u32, scale: f32) -> i32;
         fn pulsar_idx_topk(selected: *mut c_void, scores: *const c_void, n_rows: u32, top_k: u32) -> i32;
         fn pulsar_idx_scores_batch(scores: *mut c_void, q: *const c_void, weights: *const c_void, cache: *const c_void, q16: *mut c_void, n_rows: u32, n_tokens: u32, pos0: u32, n_head: u32, head_dim: u32, scale: f32, fp8: u32) -> i32;
         fn pulsar_idx_selftest() -> i32;
@@ -903,6 +904,34 @@ mod real {
         check(unsafe { pulsar_idx_score_one(scores.ptr_mut(), q.ptr(), weights.ptr(), cache.ptr(), n_rows, n_head, head_dim, scale, fp8) }, "idx_score_one")
     }
 
+    /// dsv4 indexer scores: f32 cache rows (QAT'd + f16-rounded), query
+    /// already rope+QAT'd on the host. Score math mirrors the host
+    /// indexer_allowed exactly (per-head block reduce, max(0,dot)*w*scale).
+    pub fn dsv4_idx_scores_one(scores: &mut DeviceBuf, q: &DeviceBuf, weights: &DeviceBuf, cache: &DeviceBuf, n_rows: u32, n_head: u32, head_dim: u32, scale: f32) -> Result {
+        check(unsafe { pulsar_dsv4_idx_scores_one(scores.ptr_mut(), q.ptr(), weights.ptr(), cache.ptr(), n_rows, n_head, head_dim, scale) }, "dsv4_idx_scores_one")
+    }
+
+    /// dsv4_idx_scores_one with byte offsets into q/weights (per-token
+    /// slices of the chunked prefill buffers).
+    #[allow(clippy::too_many_arguments)]
+    pub fn dsv4_idx_scores_one_at(scores: &mut DeviceBuf, q: &DeviceBuf, q_off: usize, weights: &DeviceBuf, w_off: usize, cache: &DeviceBuf, n_rows: u32, n_head: u32, head_dim: u32, scale: f32) -> Result {
+        let q_ptr = unsafe { (q.ptr() as *const u8).add(q_off) as *const c_void };
+        let w_ptr = unsafe { (weights.ptr() as *const u8).add(w_off) as *const c_void };
+        check(unsafe { pulsar_dsv4_idx_scores_one(scores.ptr_mut(), q_ptr, w_ptr, cache.ptr(), n_rows, n_head, head_dim, scale) }, "dsv4_idx_scores_one_at")
+    }
+
+    /// Batched dsv4_idx_scores_one: scores_off is a byte offset into
+    /// `scores` (the row-major per-token scratch), so many tokens'
+    /// score kernels can be enqueued back-to-back and drained with ONE
+    /// readback instead of one blocking D2H per token.
+    #[allow(clippy::too_many_arguments)]
+    pub fn dsv4_idx_scores_one_batch_at(scores: &mut DeviceBuf, scores_off: usize, q: &DeviceBuf, q_off: usize, weights: &DeviceBuf, w_off: usize, cache: &DeviceBuf, n_rows: u32, n_head: u32, head_dim: u32, scale: f32) -> Result {
+        let s_ptr = unsafe { (scores.ptr_mut() as *mut u8).add(scores_off) as *mut c_void };
+        let q_ptr = unsafe { (q.ptr() as *const u8).add(q_off) as *const c_void };
+        let w_ptr = unsafe { (weights.ptr() as *const u8).add(w_off) as *const c_void };
+        check(unsafe { pulsar_dsv4_idx_scores_one(s_ptr, q_ptr, w_ptr, cache.ptr(), n_rows, n_head, head_dim, scale) }, "dsv4_idx_scores_one_batch_at")
+    }
+
     pub fn idx_topk(selected: &mut DeviceBuf, scores: &DeviceBuf, n_rows: u32, top_k: u32) -> Result {
         check(unsafe { pulsar_idx_topk(selected.ptr_mut(), scores.ptr(), n_rows, top_k) }, "idx_topk")
     }
@@ -1156,6 +1185,40 @@ mod real {
         check(
             unsafe {
                 pulsar_dsv4_attention(out_ptr, q_ptr, raw.ptr(), n_raw, comp.map_or(std::ptr::null(), |b| b.ptr()), n_comp, allowed.map_or(std::ptr::null(), |b| b.ptr()), sinks.ptr(), n_head, head_dim, scale)
+            },
+            "dsv4_attention",
+        )
+    }
+
+    /// dsv4_attention_at with a byte offset into `allowed` (the packed
+    /// per-token mask blob of the batched mask path: token i's mask lives
+    /// at allowed_off bytes into the blob).
+    #[allow(clippy::too_many_arguments)]
+    pub fn dsv4_attention_at_allowed_off(out: &mut DeviceBuf, out_off: usize, q: &DeviceBuf, q_off: usize, raw: &DeviceBuf, n_raw: u32, comp: Option<&DeviceBuf>, n_comp: u32, allowed: Option<&DeviceBuf>, allowed_off: usize, sinks: &DeviceBuf, n_head: u32, head_dim: u32, scale: f32) -> Result {
+        let out_ptr = unsafe { (out.ptr_mut() as *mut u8).add(out_off) as *mut c_void };
+        let q_ptr = unsafe { (q.ptr() as *const u8).add(q_off) as *const c_void };
+        let a_ptr = allowed.map_or(std::ptr::null(), |b| unsafe { (b.ptr() as *const u8).add(allowed_off) as *const c_void });
+        check(
+            unsafe {
+                pulsar_dsv4_attention(out_ptr, q_ptr, raw.ptr(), n_raw, comp.map_or(std::ptr::null(), |b| b.ptr()), n_comp, a_ptr, sinks.ptr(), n_head, head_dim, scale)
+            },
+            "dsv4_attention",
+        )
+    }
+
+    /// dsv4_attention_at with byte offsets into out/q/raw/allowed (the
+    /// batched mask path: each masked token attends over its OWN ring
+    /// snapshot, captured at record time because the live ring is
+    /// mutated in-loop by later tokens).
+    #[allow(clippy::too_many_arguments)]
+    pub fn dsv4_attention_at_batch(out: &mut DeviceBuf, out_off: usize, q: &DeviceBuf, q_off: usize, raw: &DeviceBuf, raw_off: usize, n_raw: u32, comp: Option<&DeviceBuf>, n_comp: u32, allowed: Option<&DeviceBuf>, allowed_off: usize, sinks: &DeviceBuf, n_head: u32, head_dim: u32, scale: f32) -> Result {
+        let out_ptr = unsafe { (out.ptr_mut() as *mut u8).add(out_off) as *mut c_void };
+        let q_ptr = unsafe { (q.ptr() as *const u8).add(q_off) as *const c_void };
+        let raw_ptr = unsafe { (raw.ptr() as *const u8).add(raw_off) as *const c_void };
+        let a_ptr = allowed.map_or(std::ptr::null(), |b| unsafe { (b.ptr() as *const u8).add(allowed_off) as *const c_void });
+        check(
+            unsafe {
+                pulsar_dsv4_attention(out_ptr, q_ptr, raw_ptr, n_raw, comp.map_or(std::ptr::null(), |b| b.ptr()), n_comp, a_ptr, sinks.ptr(), n_head, head_dim, scale)
             },
             "dsv4_attention",
         )
