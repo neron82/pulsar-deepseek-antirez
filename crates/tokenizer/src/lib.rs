@@ -248,9 +248,22 @@ impl ChatMarkers {
             });
         }
         if t.find_token("<｜User｜>").is_some() {
-            // DeepSeek V3/V4: system text is bare after bos; <think> /
-            // </think> ride as aux markers (assistant opener closes the
-            // think block - thinking stays off, ds4's default here)
+            // DeepSeek V3/V4: system text is bare after bos;  thinking /
+            //  response ride as aux markers. Some GGUFs (llama.cpp's
+            // byte-fallback export) store them byte-encoded (Ġ thinking)
+            // instead of the literal ASCII-space form, so resolve either.
+            // DeepSeek-V4-Flash ships thinking ON by default and users
+            // expect reasoning from it; callers that render raw think
+            // tokens can opt out per request with reasoning_effort=none /
+            // enable_thinking=false.
+            let thinking = t
+                .find_token(" thinking")
+                .or_else(|| t.find_token("Ġthinking"))
+                .ok_or(Error::MissingKey(" thinking/Ġthinking"))?;
+            let response = t
+                .find_token(" response")
+                .or_else(|| t.find_token("Ġresponse"))
+                .ok_or(Error::MissingKey(" response/Ġresponse"))?;
             return Ok(ChatMarkers {
                 style: ChatStyle::Deepseek,
                 bos: Some(t.bos_id.ok_or(Error::MissingKey("bos_token_id"))?),
@@ -258,10 +271,10 @@ impl ChatMarkers {
                 eot: None,
                 user: find("<｜User｜>")?,
                 assistant: find("<｜Assistant｜>")?,
-                aux0: find("<think>")?,
-                aux1: find("</think>")?,
+                aux0: thinking,
+                aux1: response,
                 stops: t.stop_ids.clone(),
-                think: false,
+                think: true,
                 reasoning: "medium",
             });
         }
@@ -428,17 +441,21 @@ impl ChatMarkers {
     }
 
     /// True when the assistant opener leaves a reasoning block OPEN, so
-    /// generation starts inside it and the first `</think>` closes it.
-    /// GLM with thinking on is the only such style: `<think>` is the last
-    /// PROMPT token, never a generated one, so a consumer that waits for an
-    /// opening tag would route the whole reply to reasoning.
+    /// generation starts inside it and the first ` response` closes it.
+    /// GLM and DeepSeek with thinking on are the only such styles:
+    /// ` thinking` is the last PROMPT token, never a generated one, so a
+    /// consumer that waits for an opening tag would route the whole reply
+    /// to reasoning.
     pub fn opens_thinking(&self) -> bool {
-        self.style == ChatStyle::Glm && self.think
+        (self.style == ChatStyle::Glm || self.style == ChatStyle::Deepseek) && self.think
     }
 
     /// Whether this style has a reasoning mode a caller can steer.
     pub fn reasoning_capable(&self) -> bool {
-        matches!(self.style, ChatStyle::Glm | ChatStyle::Harmony)
+        matches!(
+            self.style,
+            ChatStyle::Glm | ChatStyle::Harmony | ChatStyle::Deepseek
+        )
     }
 
     /// The effort levels this style understands, weakest first. Clients
@@ -639,8 +656,13 @@ impl ChatMarkers {
                 v
             }
             ChatStyle::Hy3 => vec![self.assistant, self.aux0, self.aux1],
-            // <U+FF5C>Assistant<U+FF5C> then </think>: thinking off
-            ChatStyle::Deepseek => vec![self.assistant, self.aux1],
+            // <U+FF5C>Assistant<U+FF5C> then  thinking (open, model closes it
+            // with  response) when thinking is on, otherwise a bare  response
+            ChatStyle::Deepseek => {
+                let mut v = vec![self.assistant];
+                v.push(if self.think { self.aux0 } else { self.aux1 });
+                v
+            }
             ChatStyle::Kimi => {
                 let mut v = vec![self.assistant];
                 v.extend(t.encode("assistant"));
@@ -732,6 +754,17 @@ impl ChatMarkers {
             v.push(self.aux0);
             v.extend(t.encode(text));
             v.push(self.aux1);
+            return v;
+        }
+        if self.style == ChatStyle::Deepseek {
+            // prior turns replay in the thinking-off form (bare
+            //  response): reasoning is not replayed back to the model,
+            // exactly like Harmony's analysis channel. The official ds4
+            // template only opens  thinking when reasoning_content is
+            // present, which the server never sends for history turns.
+            let mut v = vec![self.assistant, self.aux1];
+            v.extend(t.encode(text));
+            v.push(self.eot.unwrap_or(self.eos));
             return v;
         }
         let mut v = self.open_assistant(t);
