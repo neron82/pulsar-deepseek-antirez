@@ -300,10 +300,17 @@ impl ChatMarkers {
             });
         }
         if t.find_token("<|im_start|>").is_some() {
-            // Qwen ChatML: <|im_start|> opens every turn, <|im_end|> closes
+            // Qwen ChatML: <|im_start|> opens every turn, <|im_end|> closes.
+            // Qwen3.6 is a hybrid-thinking model whose template defaults
+            // thinking ON (open  thinking block); the empty-block form
+            // suppresses it. Some GGUFs store the markers byte-encoded
+            // (Ġthinking) - the opener/history resolve either form locally;
+            // aux0/aux1 stay as the turn closer (<|im_end|>).
             return Ok(ChatMarkers {
                 style: ChatStyle::ChatMl,
-                bos: t.bos_id,
+                bos: None, // qwen: add_bos_token=false; a bos here is <|endoftext|>
+                           // and corrupts the turn structure (model ends the
+                           // sequence immediately)
                 eos: t.eos_id.ok_or(Error::MissingKey("eos_token_id"))?,
                 eot: t.find_token("<|im_end|>"),
                 user: find("<|im_start|>")?,
@@ -311,7 +318,7 @@ impl ChatMarkers {
                 aux0: find("<|im_end|>")?,
                 aux1: find("<|im_end|>")?,
                 stops: t.stop_ids.clone(),
-                think: false,
+                think: true,
                 reasoning: "medium",
             });
         }
@@ -442,19 +449,20 @@ impl ChatMarkers {
 
     /// True when the assistant opener leaves a reasoning block OPEN, so
     /// generation starts inside it and the first ` response` closes it.
-    /// GLM and DeepSeek with thinking on are the only such styles:
-    /// ` thinking` is the last PROMPT token, never a generated one, so a
-    /// consumer that waits for an opening tag would route the whole reply
-    /// to reasoning.
+    /// GLM, DeepSeek and hybrid-thinking ChatML with thinking on are the
+    /// only such styles: ` thinking` is the last PROMPT token, never a
+    /// generated one, so a consumer that waits for an opening tag would
+    /// route the whole reply to reasoning.
     pub fn opens_thinking(&self) -> bool {
-        (self.style == ChatStyle::Glm || self.style == ChatStyle::Deepseek) && self.think
+        matches!(self.style, ChatStyle::Glm | ChatStyle::Deepseek | ChatStyle::ChatMl)
+            && self.think
     }
 
     /// Whether this style has a reasoning mode a caller can steer.
     pub fn reasoning_capable(&self) -> bool {
         matches!(
             self.style,
-            ChatStyle::Glm | ChatStyle::Harmony | ChatStyle::Deepseek
+            ChatStyle::Glm | ChatStyle::Harmony | ChatStyle::Deepseek | ChatStyle::ChatMl
         )
     }
 
@@ -674,16 +682,23 @@ impl ChatMarkers {
             ChatStyle::ChatMl => {
                 let mut v = vec![self.assistant];
                 v.extend(t.encode("assistant\n"));
-                // hybrid-thinking ChatML models (qwen3.6): thinking off
-                // via the empty think block, mirroring enable_thinking=false
-                if let (Some(ts), Some(te)) =
-                    (t.find_token("<think>"), t.find_token("</think>"))
-                {
-                    // exact official form: <think>\n\n</think>\n\n
-                    v.push(ts);
-                    v.extend(t.encode("\n\n"));
-                    v.push(te);
-                    v.extend(t.encode("\n\n"));
+                // hybrid-thinking ChatML models (qwen3.6): thinking on =
+                // open  thinking block the model closes itself; off =
+                // empty block  thinking\n\n response\n\n (exact form from
+                // the GGUF-embedded chat template).
+                // Markers may be byte-encoded (Ġthinking) in the vocab.
+                let ts = t.find_token(" thinking").or_else(|| t.find_token("Ġthinking"));
+                let te = t.find_token(" response").or_else(|| t.find_token("Ġresponse"));
+                if let (Some(ts), Some(te)) = (ts, te) {
+                    if self.think {
+                        v.push(ts);
+                        v.extend(t.encode("\n"));
+                    } else {
+                        v.push(ts);
+                        v.extend(t.encode("\n\n"));
+                        v.push(te);
+                        v.extend(t.encode("\n\n"));
+                    }
                 }
                 v
             }
@@ -765,6 +780,16 @@ impl ChatMarkers {
             let mut v = vec![self.assistant, self.aux1];
             v.extend(t.encode(text));
             v.push(self.eot.unwrap_or(self.eos));
+            return v;
+        }
+        if self.style == ChatStyle::ChatMl {
+            // prior turns replay WITHOUT the empty think block, matching
+            // the fixed qwen3.6 template (froggeric-v20): <|im_start|>assistant\n
+            // + content, no thinking markers, closed by <|im_end|>.
+            let mut v = vec![self.assistant];
+            v.extend(t.encode(&format!("assistant\n{text}")));
+            v.push(self.eot.unwrap_or(self.eos));
+            v.extend(t.encode("\n"));
             return v;
         }
         let mut v = self.open_assistant(t);
