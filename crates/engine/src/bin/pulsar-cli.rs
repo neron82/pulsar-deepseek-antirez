@@ -52,6 +52,8 @@ fn run_chat(
     temp: Option<f32>,
     top_p: Option<f32>,
     min_p: f32,
+    top_k: u32,
+    repeat_penalty: f32,
     seed: u64,
     max_tokens: usize,
 ) -> engine::Result {
@@ -64,7 +66,9 @@ fn run_chat(
     };
     let temp = temp.unwrap_or_else(|| meta_f("general.sampling.temp", 0.9));
     let top_p = top_p.unwrap_or_else(|| meta_f("general.sampling.top_p", 1.0));
-    let mut sampler = engine::Sampler::new(temp, top_p, min_p, seed);
+    let mut sampler = engine::Sampler::new(temp, top_p, min_p, seed)
+        .with_top_k(top_k)
+        .with_repeat_penalty(repeat_penalty, 64);
 
     let mut st = engine::State::new(model, ctx)?;
     let max_tokens = if max_tokens <= 16 { 1024 } else { max_tokens };
@@ -151,6 +155,8 @@ fn run() -> engine::Result {
     let mut temp = None;
     let mut top_p = None;
     let mut min_p = 0.0f32;
+    let mut top_k = 0u32;
+    let mut repeat_penalty = 1.0f32;
     let mut seed = 42u64;
 
     let mut args = std::env::args().skip(1);
@@ -177,6 +183,8 @@ fn run() -> engine::Result {
             "--temp" => temp = Some(need("--temp")?.parse::<f32>()?),
             "--top-p" => top_p = Some(need("--top-p")?.parse::<f32>()?),
             "--min-p" => min_p = need("--min-p")?.parse::<f32>()?,
+            "--top-k" => top_k = need("--top-k")?.parse::<u32>()?,
+            "--repeat-penalty" => repeat_penalty = need("--repeat-penalty")?.parse::<f32>()?,
             "--seed" => seed = need("--seed")?.parse::<u64>()?,
             other => return Err(format!("unknown arg {other}").into()),
         }
@@ -210,7 +218,9 @@ fn run() -> engine::Result {
     );
 
     if chat {
-        return run_chat(&model, &tok, ctx, system, temp, top_p, min_p, seed, n_predict);
+        return run_chat(
+            &model, &tok, ctx, system, temp, top_p, min_p, top_k, repeat_penalty, seed, n_predict,
+        );
     }
 
     let prompt_ids: Vec<u32> = match (tokens_arg, prompt) {
@@ -438,14 +448,18 @@ fn run() -> engine::Result {
 
     let mut pos = prompt_ids.len() as u32;
     let mut generated = Vec::new();
+    let mut sampler = engine::Sampler::new(temp.unwrap_or(0.0), top_p.unwrap_or(1.0), min_p, seed)
+        .with_top_k(top_k)
+        .with_repeat_penalty(repeat_penalty, 64);
     let t2 = std::time::Instant::now();
     for _ in 0..n_predict {
         let l = logits.as_ref().ok_or("no logits")?;
-        let next = engine::argmax(l);
+        let next = sampler.sample(l);
         if tok.is_eog(next) {
             break;
         }
         generated.push(next);
+        sampler.record(next);
         print!("{}", String::from_utf8_lossy(&tok.decode(&[next])));
         use std::io::Write;
         std::io::stdout().flush().ok();

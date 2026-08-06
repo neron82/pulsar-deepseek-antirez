@@ -1463,6 +1463,8 @@ fn handle_chat(
     let temp = req["temperature"].as_f64().map(|v| v as f32).unwrap_or(default_temp);
     let top_p = req["top_p"].as_f64().map(|v| v as f32).unwrap_or(1.0);
     let min_p = req["min_p"].as_f64().map(|v| v as f32).unwrap_or(0.0);
+    let top_k = req["top_k"].as_u64().map(|v| v as u32).unwrap_or(0);
+    let repeat_penalty = req["repeat_penalty"].as_f64().map(|v| v as f32).unwrap_or(1.0);
     let seed = req["seed"].as_u64().unwrap_or(42);
     let streaming = req["stream"].as_bool().unwrap_or(false);
 
@@ -1526,7 +1528,9 @@ fn handle_chat(
         .map(|v| v as usize)
         .unwrap_or(room)
         .min(room);
-    let mut sampler = engine::Sampler::new(temp, top_p, min_p, seed);
+    let mut sampler = engine::Sampler::new(temp, top_p, min_p, seed)
+        .with_top_k(top_k)
+        .with_repeat_penalty(repeat_penalty, 64);
     let id = format!("chatcmpl-{request_id}");
 
     // Prefix cache: skip re-prefilling whatever the engine already holds.

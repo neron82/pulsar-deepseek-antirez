@@ -8028,6 +8028,7 @@ mod real {
                 break;
             }
             on_token(next);
+            sampler.record(next);
             logits = model.forward_batch(st, &[next], pos, true)?;
             pos += 1;
         }
@@ -8046,17 +8047,54 @@ mod real {
     }
 
     /// Temperature + nucleus (top-p) + min-p sampling, seeded and
-    /// reproducible. temp <= 0 is greedy.
+    /// reproducible. temp <= 0 is greedy. Optional top-k truncation and
+    /// repetition penalty (llama.cpp semantics: logit /= penalty for
+    /// tokens seen in the recent window; 0/1.0 disable).
     pub struct Sampler {
         pub temp: f32,
         pub top_p: f32,
         pub min_p: f32,
+        pub top_k: u32,
+        pub repeat_penalty: f32,
+        pub repeat_window: usize,
+        last: Vec<u32>,
         state: u64,
     }
 
     impl Sampler {
         pub fn new(temp: f32, top_p: f32, min_p: f32, seed: u64) -> Sampler {
-            Sampler { temp, top_p, min_p, state: seed | 1 }
+            Sampler {
+                temp,
+                top_p,
+                min_p,
+                top_k: 0,
+                repeat_penalty: 1.0,
+                repeat_window: 64,
+                last: Vec::new(),
+                state: seed | 1,
+            }
+        }
+
+        pub fn with_top_k(mut self, k: u32) -> Sampler {
+            self.top_k = k;
+            self
+        }
+
+        pub fn with_repeat_penalty(mut self, p: f32, window: usize) -> Sampler {
+            self.repeat_penalty = p;
+            self.repeat_window = window.max(1);
+            self
+        }
+
+        /// Record a GENERATED token (never prompt tokens) for the
+        /// repetition window. The penalty must only ever see the model's
+        /// own output, or prompt fidelity degrades.
+        pub fn record(&mut self, id: u32) {
+            self.last.push(id);
+            if self.last.len() > self.repeat_window {
+                let drop = self.last.len() - self.repeat_window;
+                self.last.drain(..drop);
+            }
         }
 
         pub fn is_greedy(&self) -> bool {
@@ -8079,6 +8117,21 @@ mod real {
             }
             let mut cand: Vec<(u32, f32)> =
                 logits.iter().enumerate().map(|(i, &l)| (i as u32, l)).collect();
+            // repetition penalty: divide the logit of every token that
+            // appeared in the recent generated window (llama.cpp order:
+            // penalty BEFORE top-k/top-p/min-p, applied to raw logits).
+            if self.repeat_penalty > 1.0 && !self.last.is_empty() {
+                for &t in &self.last {
+                    if let Some(c) = cand.iter_mut().find(|c| c.0 == t) {
+                        c.1 /= self.repeat_penalty;
+                    }
+                }
+            }
+            // top-k truncation (0 = disabled)
+            if self.top_k > 0 && (self.top_k as usize) < cand.len() {
+                cand.select_nth_unstable_by(self.top_k as usize, |a, b| b.1.total_cmp(&a.1));
+                cand.truncate(self.top_k as usize);
+            }
             cand.sort_unstable_by(|a, b| b.1.total_cmp(&a.1));
             // softmax with temperature over the sorted candidates
             let maxl = cand[0].1;

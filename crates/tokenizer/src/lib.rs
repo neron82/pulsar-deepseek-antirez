@@ -268,7 +268,11 @@ impl ChatMarkers {
                 style: ChatStyle::Deepseek,
                 bos: Some(t.bos_id.ok_or(Error::MissingKey("bos_token_id"))?),
                 eos: t.eos_id.ok_or(Error::MissingKey("eos_token_id"))?,
-                eot: None,
+                // ds4's turn-end is <|EOT|> (128805), NOT eos (1 =
+                // <|endoftext|>). History turns MUST close with <|EOT|> or
+                // the model reads the sequence as ended and collapses on
+                // the next turn.
+                eot: t.find_token("<|EOT|>"),
                 user: find("<｜User｜>")?,
                 assistant: find("<｜Assistant｜>")?,
                 aux0: thinking,
@@ -902,6 +906,7 @@ impl Tokenizer {
             "<|eom_id|>", "<|im_end|>", "<|end|>", "<end_of_turn>",
             "<|endofturn|>", "<|content_model_end_sampling|>", "[e~[",
             "<|user|>", "<|observation|>", "<|return|>", "[EOS]",
+            "<|EOT|>",
         ];
         for (i, tok) in tokens.iter().enumerate() {
             if EOG_TEXTS.iter().any(|t| *t == tok.as_str()) {
