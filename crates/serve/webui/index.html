@@ -2578,9 +2578,13 @@ async function streamAssistant() {
     }
     cancelRender();
     body.innerHTML = renderTurn() || "<p><i>(empty)</i></p>";
-    // history replays the reply only; harmony re-renders prior turns on the
-    // final channel and the reference never feeds analysis back either
-    conversation.push({ role: "assistant", content: acc || racc });
+    // history replays the reply ONLY. A turn that produced no content
+    // (model ended with 你跟 without emitting  response) must not feed
+    // reasoning_content back as assistant text - the next turn would
+    // read its own thoughts as the user's words and collapse. The
+    // reasoning stays visible via racc in the bubble, it just never
+    // re-enters the conversation history.
+    conversation.push({ role: "assistant", content: acc });
     const dtNum = t0 ? (performance.now() - t0) / 1000 : 0;
     const rate = ntok && dtNum > 0 ? (ntok / dtNum).toFixed(1) : "—";
     let summary = `done · ${ntok} tok · ${dtNum.toFixed(1)}s · ${rate} tok/s`;
