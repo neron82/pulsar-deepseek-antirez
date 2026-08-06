@@ -1429,6 +1429,14 @@
             <input type="number" id="min-p" step="0.01" min="0" max="1" placeholder="0 (blank = off)" />
             <div class="hint">drops tokens scoring under this fraction of the top one. 0.05 is antirez's recommendation for Laguna at low quant</div>
           </label>
+          <label><span class="field-label">top_k <span class="hint">0 = off</span></span>
+            <input type="number" id="top-k" step="1" min="0" placeholder="0 (blank = off)" />
+            <div class="hint">keep only the K highest-probability tokens before sampling. 100 pairs well with repeat_penalty on 2-bit quants</div>
+          </label>
+          <label><span class="field-label">repeat_penalty <span class="hint">1.0 = off</span></span>
+            <input type="number" id="repeat-penalty" step="0.01" min="1" placeholder="1.0 (blank = off)" />
+            <div class="hint">divides the logits of recently generated tokens (64-token window). 1.15 is the sweet spot for DeepSeek 2-bit reasoning loops</div>
+          </label>
           <label><span class="field-label">seed</span>
             <input type="number" id="seed" step="1" placeholder="42" />
           </label>
@@ -2079,12 +2087,16 @@ function applyStats(j) {
 // Reasoning effort slider: stops are [model default, ...reasoning.levels] from
 // /stats. Hidden input #reasoning-effort carries the resolved string ("" at
 // stop 0) so getSettings keeps working unchanged. Non-thinking models: disable.
+// NOTE: capable && no levels is NOT "not a thinking model" - DeepSeek ships
+// thinking ON with enable_thinking but has no effort vocabulary in its
+// template (reasoning_levels() == []). The slider stays at "default"
+// (disabled), the enable-thinking checkbox stays usable.
 let effortStops = [""]; // index 0 = model default (omit reasoning_effort)
 function applyReasoning(rs) {
   const wrap = $("reasoning-wrap");
   const slider = $("reasoning-slider");
   const ticks = $("reasoning-ticks");
-  if (!rs?.capable || !Array.isArray(rs.levels) || !rs.levels.length) {
+  if (!rs?.capable) {
     effortStops = [""];
     slider.max = 0;
     slider.value = 0;
@@ -2097,18 +2109,23 @@ function applyReasoning(rs) {
   }
   slider.disabled = false;
   $("thinking-row").hidden = false;
-  effortStops = ["", ...rs.levels];
+  effortStops = ["", ...(rs.levels || [])];
   const prev = parseInt(slider.value, 10) || 0;
   slider.max = effortStops.length - 1;
   slider.value = Math.min(prev, effortStops.length - 1);
   ticks.textContent = "";
-  const names = ["default", ...rs.levels];
+  const names = ["default", ...(rs.levels || [])];
   for (let i = 0; i < names.length; i++) {
     const s = document.createElement("span");
     s.textContent = names[i];
     ticks.appendChild(s);
   }
   syncEffort();
+  // No effort levels (DeepSeek): the slider is a single "default" stop -
+  // keep it visibly disabled so users aren't misled into dragging nowhere.
+  if (!rs.levels || !rs.levels.length) {
+    slider.disabled = true;
+  }
 }
 function syncEffort() {
   const i = parseInt($("reasoning-slider").value, 10) || 0;
@@ -2403,6 +2420,10 @@ function getSettings() {
   if (Number.isFinite(maxTok) && maxTok > 0) body.max_tokens = maxTok;
   const minP = parseFloat($("min-p").value);
   if (Number.isFinite(minP)) body.min_p = minP;
+  const topK = parseInt($("top-k").value, 10);
+  if (Number.isFinite(topK) && topK > 0) body.top_k = topK;
+  const rp = parseFloat($("repeat-penalty").value);
+  if (Number.isFinite(rp) && rp > 0) body.repeat_penalty = rp;
   const seed = parseInt($("seed").value, 10);
   if (Number.isFinite(seed)) body.seed = seed;
   // omitted entirely when left on "model default" - sending an empty

@@ -112,6 +112,12 @@ fn run() -> engine::Result {
     let mut prefix_file: Option<String> = None;
     let mut webui_mcp_proxy = false;
     let mut mcp_config: Option<String> = None;
+    // Sampling defaults for the whole server. Per-request fields in the
+    // chat body override these; flags make the parameters reachable from
+    // the WebUI (which has no other way to set them globally).
+    let mut srv_min_p = 0.0f32;
+    let mut srv_top_k = 0u32;
+    let mut srv_repeat_penalty = 1.0f32;
     let mut args = std::env::args().skip(1);
     while let Some(a) = args.next() {
         let mut need = |name: &str| args.next().ok_or_else(|| format!("{name} needs a value"));
@@ -125,6 +131,9 @@ fn run() -> engine::Result {
             // ./mcp.json next to the server cwd.
             "--webui-mcp-proxy" => webui_mcp_proxy = true,
             "--mcp-config" => mcp_config = Some(need("--mcp-config")?),
+            "--min-p" => srv_min_p = need("--min-p")?.parse::<f32>()?,
+            "--top-k" => srv_top_k = need("--top-k")?.parse::<u32>()?,
+            "--repeat-penalty" => srv_repeat_penalty = need("--repeat-penalty")?.parse::<f32>()?,
             other => return Err(format!("unknown arg {other}").into()),
         }
     }
@@ -724,6 +733,9 @@ fn run() -> engine::Result {
                     &mut st,
                     &model_name,
                     default_temp,
+                    srv_min_p,
+                    srv_top_k,
+                    srv_repeat_penalty,
                     request_id,
                     &mut hist,
                     mcp.as_ref(),
@@ -1450,6 +1462,9 @@ fn handle_chat(
     st: &mut engine::State,
     model_name: &str,
     default_temp: f32,
+    srv_min_p: f32,
+    srv_top_k: u32,
+    srv_repeat_penalty: f32,
     request_id: u64,
     hist: &mut Vec<u32>,
     mcp: Option<&mcp::McpHub>,
@@ -1462,9 +1477,11 @@ fn handle_chat(
         .ok_or("chat request needs a messages array")?;
     let temp = req["temperature"].as_f64().map(|v| v as f32).unwrap_or(default_temp);
     let top_p = req["top_p"].as_f64().map(|v| v as f32).unwrap_or(1.0);
-    let min_p = req["min_p"].as_f64().map(|v| v as f32).unwrap_or(0.0);
-    let top_k = req["top_k"].as_u64().map(|v| v as u32).unwrap_or(0);
-    let repeat_penalty = req["repeat_penalty"].as_f64().map(|v| v as f32).unwrap_or(1.0);
+    // Per-request fields override the server start flags (--min-p, --top-k,
+    // --repeat-penalty); the flags give the WebUI a way to set them globally.
+    let min_p = req["min_p"].as_f64().map(|v| v as f32).unwrap_or(srv_min_p);
+    let top_k = req["top_k"].as_u64().map(|v| v as u32).unwrap_or(srv_top_k);
+    let repeat_penalty = req["repeat_penalty"].as_f64().map(|v| v as f32).unwrap_or(srv_repeat_penalty);
     let seed = req["seed"].as_u64().unwrap_or(42);
     let streaming = req["stream"].as_bool().unwrap_or(false);
 
