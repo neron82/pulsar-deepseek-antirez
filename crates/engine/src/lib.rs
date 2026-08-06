@@ -8154,13 +8154,20 @@ mod real {
             }
             let mut cand: Vec<(u32, f32)> =
                 logits.iter().enumerate().map(|(i, &l)| (i as u32, l)).collect();
-            // repetition penalty: divide the logit of every token that
-            // appeared in the recent generated window (llama.cpp order:
-            // penalty BEFORE top-k/top-p/min-p, applied to raw logits).
+            // repetition penalty: llama.cpp semantics apply it once per
+            // DISTINCT generated token, before top-k/top-p/min-p. Positive
+            // logits divide by the penalty; negative logits multiply so they
+            // become less likely too (dividing a negative boosts it).
             if self.repeat_penalty > 1.0 && !self.last.is_empty() {
-                for &t in &self.last {
-                    if let Some(c) = cand.iter_mut().find(|c| c.0 == t) {
-                        c.1 /= self.repeat_penalty;
+                let recent: std::collections::HashSet<u32> =
+                    self.last.iter().copied().collect();
+                for c in &mut cand {
+                    if recent.contains(&c.0) {
+                        if c.1 < 0.0 {
+                            c.1 *= self.repeat_penalty;
+                        } else {
+                            c.1 /= self.repeat_penalty;
+                        }
                     }
                 }
             }
@@ -8202,7 +8209,41 @@ mod real {
             cand[kept - 1].0
         }
     }
-}
 
+    #[cfg(test)]
+    mod sampler_tests {
+        use super::Sampler;
+
+        #[test]
+        fn repeat_penalty_depresses_negative_logits_too() {
+            // Correct llama.cpp semantics multiply negative logits by the
+            // penalty. With top-p=0.8 that removes the repeated second token
+            // from the candidate set for every seed; dividing it instead
+            // makes -1.0 become -0.5 and lets it win ~38% of samples.
+            let logits = [0.0, -1.0];
+            for seed in 1..=256 {
+                let mut sampler = Sampler::new(1.0, 0.8, 0.0, seed)
+                    .with_repeat_penalty(2.0, 64);
+                sampler.record(1);
+                assert_eq!(sampler.sample(&logits), 0, "seed {seed}");
+            }
+        }
+
+        #[test]
+        fn repeat_penalty_applies_once_per_distinct_token() {
+            // A duplicated token in the rolling window gets one penalty, not
+            // a penalty squared. With top-p=0.6 the once-penalized token is
+            // the sole candidate; a twice-divided positive logit is not.
+            let logits = [0.0, 1.0];
+            for seed in 1..=256 {
+                let mut sampler = Sampler::new(1.0, 0.6, 0.0, seed)
+                    .with_repeat_penalty(2.0, 64);
+                sampler.record(1);
+                sampler.record(1);
+                assert_eq!(sampler.sample(&logits), 1, "seed {seed}");
+            }
+        }
+    }
+}
 #[cfg(target_os = "linux")]
 pub use real::*;

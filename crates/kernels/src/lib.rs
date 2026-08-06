@@ -694,10 +694,14 @@ mod real {
             Ok(CopyStream { stream, event, gate })
         }
 
-        /// Make queued-after copies wait for all default-stream work
+        /// Make queued-after copies wait for all compute-stream work
         /// submitted so far (the consumers of whatever the arena holds).
+        ///
+        /// Kernels are compiled with `--default-stream=per-thread`; NULL is
+        /// CUDA's legacy stream, a different stream with no ordering edge to
+        /// the launched kernels. Use the same per-thread stream explicitly.
         pub fn gate_behind_default(&self) -> Result {
-            check_rt(unsafe { cudaEventRecord(self.gate, std::ptr::null_mut()) }, "gate record")?;
+            check_rt(unsafe { cudaEventRecord(self.gate, STREAM_PER_THREAD) }, "gate record")?;
             check_rt(unsafe { cudaStreamWaitEvent(self.stream, self.gate, 0) }, "gate wait")
         }
 
@@ -757,12 +761,14 @@ mod real {
             unsafe { cudaEventQuery(self.event) == 0 }
         }
 
-        /// Make the default stream wait for the last `record` (kernels
-        /// launched afterward see completed H2D without a full device sync).
+        /// Make the calling thread's compute stream wait for the last
+        /// `record`. The CUDA kernels use `--default-stream=per-thread`, so
+        /// waiting on legacy NULL would leave their stream unordered with the
+        /// side-stream H2D and permit it to read an incomplete expert slab.
         pub fn wait_default(&self) -> Result {
             check_rt(
-                unsafe { cudaStreamWaitEvent(std::ptr::null_mut(), self.event, 0) },
-                "default wait event",
+                unsafe { cudaStreamWaitEvent(STREAM_PER_THREAD, self.event, 0) },
+                "per-thread stream wait event",
             )
         }
 

@@ -248,22 +248,18 @@ impl ChatMarkers {
             });
         }
         if t.find_token("<｜User｜>").is_some() {
-            // DeepSeek V3/V4: system text is bare after bos;  thinking /
-            //  response ride as aux markers. Some GGUFs (llama.cpp's
-            // byte-fallback export) store them byte-encoded (Ġ thinking)
-            // instead of the literal ASCII-space form, so resolve either.
-            // DeepSeek-V4-Flash ships thinking ON by default and users
-            // expect reasoning from it; callers that render raw think
-            // tokens can opt out per request with reasoning_effort=none /
-            // enable_thinking=false.
-            let thinking = t
-                .find_token(" thinking")
+            // Native V4-Flash exports use real <think>/</think> control
+            // tokens. Alternate GGUF exports encode the same template switch
+            // as byte-BPE `Ġthinking`/`Ġresponse`; prefer the literal tags
+            // when both are present, then fall back so either export works.
+            let thinking = t.find_token("<think>")
+                .or_else(|| t.find_token(" thinking"))
                 .or_else(|| t.find_token("Ġthinking"))
-                .ok_or(Error::MissingKey(" thinking/Ġthinking"))?;
-            let response = t
-                .find_token(" response")
+                .ok_or(Error::MissingKey("<think>/ thinking/Ġthinking"))?;
+            let response = t.find_token("</think>")
+                .or_else(|| t.find_token(" response"))
                 .or_else(|| t.find_token("Ġresponse"))
-                .ok_or(Error::MissingKey(" response/Ġresponse"))?;
+                .ok_or(Error::MissingKey("</think>/ response/Ġresponse"))?;
             return Ok(ChatMarkers {
                 style: ChatStyle::Deepseek,
                 // DeepSeek-V4-Flash GGUF: add_bos_token=false, bos_token_id=0
@@ -272,16 +268,19 @@ impl ChatMarkers {
                 // class as the Qwen/ChatML fix — bos must be None here.
                 bos: None,
                 eos: t.eos_id.ok_or(Error::MissingKey("eos_token_id"))?,
-                // ds4's turn-end is <|EOT|> (128805), NOT eos (1 =
-                // <|endoftext|>). History turns MUST close with <|EOT|> or
-                // the model reads the sequence as ended and collapses on
-                // the next turn.
+                // Retain <|EOT|> as an optional stop for variants that emit
+                // it, but V4-Flash's embedded template closes history with
+                // eos (<｜end▁of▁sentence｜>), not this marker.
                 eot: t.find_token("<|EOT|>"),
                 user: find("<｜User｜>")?,
                 assistant: find("<｜Assistant｜>")?,
                 aux0: thinking,
                 aux1: response,
                 stops: t.stop_ids.clone(),
+                // DeepSeek-V4-Flash is a reasoning model. Preserve its
+                // thinking-on default for CLI and API clients that omit an
+                // explicit override; the WebUI sends enable_thinking either
+                // way, and false remains a supported opt-out.
                 think: true,
                 reasoning: "medium",
             });
@@ -464,6 +463,12 @@ impl ChatMarkers {
     pub fn opens_thinking(&self) -> bool {
         matches!(self.style, ChatStyle::Glm | ChatStyle::Deepseek | ChatStyle::ChatMl)
             && self.think
+    }
+
+    /// Whether this generated token closes a DeepSeek reasoning block. Native
+    /// V4 tokens are `</think>`; alternate GGUFs use byte-BPE `Ġresponse`.
+    pub fn closes_thinking_token(&self, token: u32) -> bool {
+        self.style == ChatStyle::Deepseek && self.think && token == self.aux1
     }
 
     /// Whether this style has a reasoning mode a caller can steer.
@@ -780,14 +785,13 @@ impl ChatMarkers {
             return v;
         }
         if self.style == ChatStyle::Deepseek {
-            // prior turns replay in the thinking-off form (bare
-            //  response): reasoning is not replayed back to the model,
-            // exactly like Harmony's analysis channel. The official ds4
-            // template only opens  thinking when reasoning_content is
-            // present, which the server never sends for history turns.
+            // Prior turns replay in the thinking-off form: reasoning is not
+            // fed back as assistant history. V4-Flash's template closes an
+            // assistant message with EOS, even though <|EOT|> remains a stop
+            // token for other DeepSeek variants.
             let mut v = vec![self.assistant, self.aux1];
             v.extend(t.encode(text));
-            v.push(self.eot.unwrap_or(self.eos));
+            v.push(self.eos);
             return v;
         }
         if self.style == ChatStyle::ChatMl {
@@ -1856,6 +1860,90 @@ fn pretokenize_glm4(s: &[u8]) -> Vec<&[u8]> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Minimal V4-Flash-style vocab: it contains both the true control tags
+    /// and ordinary BPE words that must never be mistaken for controls.
+    fn deepseek_test_tokenizer() -> Tokenizer {
+        let tokens = vec![
+            "<｜begin▁of▁sentence｜>",
+            "<｜end▁of▁sentence｜>",
+            "<｜User｜>",
+            "<｜Assistant｜>",
+            "<think>",
+            "</think>",
+            "Ġthinking",
+            "Ġresponse",
+            "<|EOT|>",
+        ]
+        .into_iter()
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+        let token_to_id = tokens
+            .iter()
+            .enumerate()
+            .map(|(i, token)| (token.clone(), i as u32))
+            .collect();
+        let mut byte_to_char = ['\0'; 256];
+        let mut char_to_byte = HashMap::with_capacity(256);
+        for byte in 0..=255u8 {
+            let ch = gpt2_byte_to_char(byte);
+            byte_to_char[byte as usize] = ch;
+            char_to_byte.insert(ch, byte);
+        }
+        Tokenizer {
+            tokens,
+            token_to_id,
+            merge_rank: HashMap::new(),
+            byte_to_char,
+            char_to_byte,
+            bos_id: Some(0),
+            eos_id: Some(1),
+            eot_id: None,
+            stop_ids: vec![1, 8],
+            add_bos: false,
+            pre: Pre::JoyAi,
+        }
+    }
+
+    #[test]
+    fn deepseek_v4_chat_uses_tag_controls_and_eos_history_closure() {
+        let tokenizer = deepseek_test_tokenizer();
+        let mut markers = ChatMarkers::resolve(&tokenizer).expect("DeepSeek markers");
+
+        // DeepSeek-V4-Flash is a reasoning model. Its default opener must be
+        // a real <think> block so CLI and API clients that do not send an
+        // override retain thinking; `Ġthinking` (id 6) stays an ordinary BPE
+        // word and must never become the control.
+        assert!(markers.opens_thinking());
+        assert_eq!(markers.render_user_turn(&tokenizer, ""), vec![2, 3, 4]);
+        assert_eq!(markers.render_assistant_history(&tokenizer, ""), vec![3, 5, 1]);
+
+        // Explicit opt-out still starts directly in the response channel.
+        markers.set_think(false);
+        assert!(!markers.opens_thinking());
+        assert_eq!(markers.render_user_turn(&tokenizer, ""), vec![2, 3, 5]);
+    }
+
+    #[test]
+    fn deepseek_v4_chat_falls_back_to_byte_encoded_controls() {
+        // Some older/alternate V4-Flash GGUF exports lack literal <think>
+        // tags and use byte-BPE controls instead. They must remain usable
+        // without changing the preferred literal-tag path above.
+        let mut tokenizer = deepseek_test_tokenizer();
+        tokenizer.tokens[4] = "Ġthinking".into();
+        tokenizer.tokens[5] = "Ġresponse".into();
+        tokenizer.tokens[6] = "ordinary_word".into();
+        tokenizer.tokens[7] = "another_word".into();
+        tokenizer.token_to_id = tokenizer.tokens.iter().enumerate()
+            .map(|(i, token)| (token.clone(), i as u32)).collect();
+
+        let mut markers = ChatMarkers::resolve(&tokenizer).expect("byte-BPE controls");
+        assert!(markers.opens_thinking());
+        assert!(markers.closes_thinking_token(5));
+        assert_eq!(markers.render_user_turn(&tokenizer, ""), vec![2, 3, 4]);
+        markers.set_think(false);
+        assert_eq!(markers.render_user_turn(&tokenizer, ""), vec![2, 3, 5]);
+    }
 
     #[test]
     fn kimi_k2_han_runs_and_inline_contractions() {

@@ -24,8 +24,16 @@ IQ2XXS imatrix GGUF, `PULSAR_CACHE_GB=85`, 131072 ctx)
 
 Every optimization landed behind an A/B gate: batch path vs host oracle,
 77,616 mask comparisons with 0 diffs, dumps byte-identical, generated
-ids identical to the reference build. No float operation was ever
-reordered — everything that changed is deterministic.
+ids identical to the reference build. No float operation was intentionally
+reordered.
+
+> **Correctness status (post-measurement repair):** the historical attention
+> optimization contained two defects that the then-current oracle did not
+> expose: a warp-local visible-row denominator and a k→k+2 parity-buffer race.
+> The kernel is now corrected, but the 128k speed figures above are historical
+> measurements, not a claim for the corrected binary. Re-measure before using
+> them as a current performance baseline. See
+> [`docs/dsv4-correctness-and-reasoning-repairs.md`](docs/dsv4-correctness-and-reasoning-repairs.md).
 
 ### Depth-scaling of the host top-k parallelization (60k run, per 8k bucket)
 
@@ -48,10 +56,11 @@ scoped threads amortizes exactly there.
 - **Host top-k parallelization** — the indexer top-k (`select_nth_unstable_by`)
   per masked token runs on up to 8 scoped threads instead of sequentially;
   bit-exact by construction (same comparator, same partition, no float ops).
-- **Barrier reduction in attention** — parity double-buffering cut 5
-  `__syncthreads` per chunk to 2 (constant per-chunk win at every depth).
 - **Ballot-compacted attention value loop** — visible rows only, chunk
-  boundaries kept intact so float summation order never changes.
+  boundaries kept intact so float summation order never changes. The final
+  implementation uses the block-wide visible-row total and closes the
+  parity-buffer read phase with an end-of-chunk barrier; see the correctness
+  note above before treating prior speed data as current.
 - **Chunk-skip (all-masked chunks) — measured and REVERTED**: the empty-chunk
   fraction reaches 35.8% at 65-80k depth, but the skip tax (extra barrier +
   uniform branch + bitmap read per chunk) costs more than skipping saves

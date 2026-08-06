@@ -164,8 +164,14 @@ __global__ static void dsv4_attention_kernel(
                 unsigned rank = pre + __popc(b & ((1u << lane) - 1u));
                 crow[p][rank] = tid;
             }
+            // `pre` is the count before THIS warp and is correct for the
+            // compacted-row rank. It is not the total. Every thread must
+            // accumulate the SAME visible rows into its own denominator and
+            // value lanes; deriving n_vis from this warp's ballot made the
+            // four warps attend 32/64/96/128 rows respectively.
             __syncthreads();
-            unsigned n_vis = pre + __popc(b);
+            unsigned n_vis = __popc(warp_vis[0]) + __popc(warp_vis[1])
+                + __popc(warp_vis[2]) + __popc(warp_vis[3]);
             for (uint32_t r = 0u; r < n_vis; r++) {
                 uint32_t rr = crow[p][r];
                 float w = s_w[p][rr];
@@ -180,11 +186,12 @@ __global__ static void dsv4_attention_kernel(
             }
         }
         m = m_new;
-        // NO end-of-loop barrier: the parity buffers make the next
-        // chunk's writes land in the OTHER buffer half, so a slow thread
-        // still reading this chunk's crow/s_w cannot collide with a fast
-        // thread's next-chunk writes. (The final __syncthreads below
-        // covers the last chunk's reads before out[] is written.)
+        // Parity only protects the immediately following chunk. A fast warp
+        // can otherwise reach k+2 (the same parity) while a slow warp still
+        // reads this chunk's shared rows; `warp_vis` is also shared across
+        // parities. Close the block-wide read phase before either can write
+        // the next chunk's state.
+        __syncthreads();
     }
     __syncthreads();
     for (uint32_t d = tid, k = 0; d < head_dim; d += 128u, k++) {

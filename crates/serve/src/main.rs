@@ -1004,6 +1004,16 @@ mod tests {
         assert!(!origin_ok(Some("http://127.0.0.1:8080"), None));
         assert!(!origin_ok(Some("http://"), Some("127.0.0.1:8080")));
     }
+
+    #[test]
+    fn webui_explicitly_transmits_checked_thinking() {
+        // A checked control has to reach the request. Omitting `true` made
+        // the UI look enabled while the server retained its marker default.
+        let webui = include_str!("../webui/index.html");
+        assert!(webui.contains(
+            "body.chat_template_kwargs = { enable_thinking: $(\"enable-thinking\").checked };"
+        ));
+    }
 }
 
 #[cfg(target_os = "linux")]
@@ -1717,7 +1727,7 @@ fn handle_chat(
                             _ if reasoning => rbytes.extend_from_slice(&d),
                             _ => bytes.extend_from_slice(&d),
                         }
-                    } else if open_think && d.as_slice() == b"</think>" {
+                    } else if open_think && (markers.closes_thinking_token(t) || d.as_slice() == b"</think>") {
                         reasoning = false; // close: the reply starts here
                     } else if open_think && reasoning {
                         rbytes.extend_from_slice(&d);

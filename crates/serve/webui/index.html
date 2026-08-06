@@ -2430,9 +2430,11 @@ function getSettings() {
   // string would override the checkpoint's own setting with nothing
   const effort = $("reasoning-effort").value;
   if (effort) body.reasoning_effort = effort;
-  // thinking off = explicit false; on = omit and let the checkpoint decide
-  if (!$("thinking-row").hidden && !$("enable-thinking").checked) {
-    body.chat_template_kwargs = { enable_thinking: false };
+  // Send the current checkbox state both ways. The server resolves a fresh
+  // marker set per request, so omission cannot safely mean "on": a model's
+  // internal default and the WebUI's checked control can differ.
+  if (!$("thinking-row").hidden) {
+    body.chat_template_kwargs = { enable_thinking: $("enable-thinking").checked };
   }
   return body;
 }
