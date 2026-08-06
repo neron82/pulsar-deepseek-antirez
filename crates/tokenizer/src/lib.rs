@@ -266,7 +266,11 @@ impl ChatMarkers {
                 .ok_or(Error::MissingKey(" response/Ġresponse"))?;
             return Ok(ChatMarkers {
                 style: ChatStyle::Deepseek,
-                bos: Some(t.bos_id.ok_or(Error::MissingKey("bos_token_id"))?),
+                // DeepSeek-V4-Flash GGUF: add_bos_token=false, bos_token_id=0
+                // IS the EOS (<|endoftext|>). Prepending it corrupts the turn
+                // structure and the model collapses immediately. Same bug
+                // class as the Qwen/ChatML fix — bos must be None here.
+                bos: None,
                 eos: t.eos_id.ok_or(Error::MissingKey("eos_token_id"))?,
                 // ds4's turn-end is <|EOT|> (128805), NOT eos (1 =
                 // <|endoftext|>). History turns MUST close with <|EOT|> or
