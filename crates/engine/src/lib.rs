@@ -2664,6 +2664,17 @@ mod real {
                     .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
                     .collect())
             }
+            // unsloth UD-* ships the indexer/compressor projections as
+            // BF16 on the Q8_K_XL lossless file too (same as the UD-*
+            // router). bf16 -> f32 decode.
+            TensorType::BF16 => {
+                let mut buf = vec![0u8; n * 2];
+                file.read_exact_at(&mut buf, g.data_offset + t.offset)?;
+                Ok(buf
+                    .chunks_exact(2)
+                    .map(|c| quant::bf16_to_f32(u16::from_le_bytes([c[0], c[1]])))
+                    .collect())
+            }
             other => Err(format!("{name}: expected f16/f32, got {other:?}").into()),
         }
     }
@@ -2734,6 +2745,23 @@ mod real {
                     let m = blk.len() / 2;
                     for (i, c) in blk.chunks_exact(2).enumerate() {
                         f[i] = requant::f16_to_f32(u16::from_le_bytes([c[0], c[1]]));
+                    }
+                    requant::quantize_q8_0(&f[..m], &mut out);
+                }
+                Ok(out)
+            }
+            // unsloth UD-* ships some compressor/indexer projections as
+            // BF16 even on the Q8_K_XL lossless file (blk.N.attn_compressor_kv).
+            // Same q8_0 fast path, bf16->f32 decode (quant::bf16_to_f32).
+            TensorType::BF16 => {
+                let mut buf = vec![0u8; n * 2];
+                file.read_exact_at(&mut buf, g.data_offset + t.offset)?;
+                let mut out = Vec::with_capacity(n / 32 * 34);
+                let mut f = [0f32; 256];
+                for blk in buf.chunks(512) {
+                    let m = blk.len() / 2;
+                    for (i, c) in blk.chunks_exact(2).enumerate() {
+                        f[i] = quant::bf16_to_f32(u16::from_le_bytes([c[0], c[1]]));
                     }
                     requant::quantize_q8_0(&f[..m], &mut out);
                 }
