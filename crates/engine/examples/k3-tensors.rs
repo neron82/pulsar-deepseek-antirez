@@ -10,7 +10,9 @@ fn main() {
 
 #[cfg(target_os = "linux")]
 fn main() {
-    let path = std::env::args().nth(1).expect("usage: k3-tensors <model.gguf>");
+    let path = std::env::args()
+        .nth(1)
+        .expect("usage: k3-tensors <model.gguf>");
     let (shards, g) = engine::parse_header(std::path::Path::new(&path)).expect("parse gguf");
     let s = engine::Shape::from_gguf(&g).expect("shape");
     println!("shards: {}, tensors: {}", shards.len(), g.tensors.len());
@@ -22,13 +24,11 @@ fn main() {
 
     // want(name, dims): dims are checked only where a mismatch would mean
     // the config parse is wrong, not merely that the file differs.
-    let mut want = |name: String, dims: &[u64]| {
-        match g.tensor(&name) {
-            None => missing.push(name),
-            Some(t) => {
-                if !dims.is_empty() && t.dims.len() >= dims.len() && t.dims[..dims.len()] != *dims {
-                    wrong.push(format!("{name}: want {dims:?} got {:?}", t.dims));
-                }
+    let mut want = |name: String, dims: &[u64]| match g.tensor(&name) {
+        None => missing.push(name),
+        Some(t) => {
+            if !dims.is_empty() && t.dims.len() >= dims.len() && t.dims[..dims.len()] != *dims {
+                wrong.push(format!("{name}: want {dims:?} got {:?}", t.dims));
             }
         }
     };
@@ -82,9 +82,15 @@ fn main() {
                 t("attn_v_b.weight"),
                 &[s.n_kv_lora as u64, s.value_mla as u64, s.n_head as u64],
             );
-            want(t("attn_gate.weight"), &[n_embd, (s.n_head * s.value_mla) as u64]);
+            want(
+                t("attn_gate.weight"),
+                &[n_embd, (s.n_head * s.value_mla) as u64],
+            );
         }
-        want(t("attn_output.weight"), &[(s.n_head * s.value_mla) as u64, n_embd]);
+        want(
+            t("attn_output.weight"),
+            &[(s.n_head * s.value_mla) as u64, n_embd],
+        );
 
         if il < s.n_leading_dense {
             want(t("ffn_gate.weight"), &[n_embd, s.n_ff_dense as u64]);

@@ -140,6 +140,22 @@ __device__ __forceinline__ static float pulsar_glu(float g, float u, uint32_t op
     return pulsar_gate_act(g, op) * u;
 }
 
+/* 5 = bailingmoe3 clamped silu: up clamped to +-limit, silu(gate) clamped
+ * to <= limit. The clamp lands AFTER silu (unlike deepseek4's op 3, which
+ * clamps the gate BEFORE silu); limit is per-layer and passed separately.
+ * Reference: llama.cpp build_moe_ffn / build_ffn LLM_FFN_SILU else-branch. */
+__device__ __forceinline__ static float pulsar_glu_clamped(float g, float u, uint32_t op, float clamp) {
+    if (op == 5u) {
+        if (clamp > 1.0e-6f) {
+            u = fminf(fmaxf(u, -clamp), clamp);
+            const float ga = g / (1.0f + expf(-g));
+            return fminf(ga, clamp) * u;
+        }
+        return g / (1.0f + expf(-g)) * u; /* plain silu */
+    }
+    return pulsar_glu(g, u, op);
+}
+
 __device__ static float warp_sum_f32(float v) {
     for (int offset = 16; offset > 0; offset >>= 1) {
         v += __shfl_down_sync(0xffffffffu, v, offset);
@@ -2197,6 +2213,7 @@ __global__ static void moe_pair_swiglu_kernel(
         uint32_t n_used,
         uint32_t n_tok,
         uint64_t row_bytes,             /* gate and up share type+in_dim */
+        float clamp,                    /* bailingmoe3 per-layer swiglu clamp */
         uint32_t act_op) {
     const uint32_t lane = threadIdx.x;
     const uint32_t row = blockIdx.x * blockDim.y + threadIdx.y;
@@ -2231,11 +2248,28 @@ __global__ static void moe_pair_swiglu_kernel(
         /* per-expert bias lands on the projection output, i.e. before the
          * gate, and the router weight still multiplies the whole thing */
         if (p.gate_b) acc_gate += p.gate_b[row];
-        if (p.up_b) acc_up += p.up_b[row];
-        mid[mid_off] = pulsar_glu(acc_gate, acc_up, act_op) * weights[slot_off];
+        mid[mid_off] = pulsar_glu_clamped(acc_gate, acc_up, act_op, clamp) * weights[slot_off];
     }
 }
 
+/* Resident-tier variant: slots whose expert lives on another rank carry
+ * their per-slot down-projection result in `ext` ([n_tok][n_used][out_dim],
+ * computed by the identical per-slot reduction in moe_down_per_slot_kernel
+ * on the tier card). Each slot's dot is fully reduced before it enters
+ * `acc`, and the tier result is inserted AT ITS SLOT POSITION, so the f32
+ * add sequence matches the single-device loop bit-for-bit - the tier stops
+ * being a drift source and both paths agree exactly.
+ * The butterfly moved inside the slot loop for the same reason: a slot's
+ * value must be a self-contained, location-independent quantity. */
+/* Resident-tier variant: slots whose expert lives on another rank carry
+ * their per-slot down-projection result in `ext` ([n_tok][n_used][out_dim],
+ * computed by the identical per-slot reduction in moe_down_per_slot_kernel
+ * on the tier card). Each slot's dot is fully reduced before it enters
+ * `acc`, and the tier result is inserted AT ITS SLOT POSITION, so the f32
+ * add sequence matches the single-device loop bit-for-bit - the tier stops
+ * being a drift source and both paths agree exactly.
+ * The butterfly lives inside the slot loop for the same reason: a slot's
+ * value must be a self-contained, location-independent quantity. */
 template <typename DOT>
 __global__ static void moe_down_kernel(
         float *out,                     /* [n_tok][out_dim] */
@@ -2245,7 +2279,8 @@ __global__ static void moe_down_kernel(
         uint32_t out_dim,
         uint32_t n_used,
         uint32_t n_tok,
-        uint64_t row_bytes) {
+        uint64_t row_bytes,
+        const float *ext /* [n_tok][n_used][out_dim], null = no tier */) {
     const uint32_t lane = threadIdx.x;
     const uint32_t row = blockIdx.x * blockDim.y + threadIdx.y;
     const uint32_t token = blockIdx.y;
@@ -2255,18 +2290,60 @@ __global__ static void moe_down_kernel(
     float acc = 0.0f;
     for (uint32_t slot = 0; slot < n_used; slot++) {
         const pulsar_expert_ptrs p = ptrs[slot_base + slot];
-        if (!p.down) continue;
+        if (!p.down) {
+            /* resident-tier slot: the identical per-slot reduction ran on
+             * the tier rank over identical bytes, so this value is what
+             * the inline dot would have produced, bit for bit */
+            if (ext) acc += ext[(slot_base + slot) * out_dim + row];
+            continue;
+        }
         const char *down_row = (const char *)p.down + (uint64_t)row * row_bytes;
         const block_q8_K *slot_midq = midq + (slot_base + slot) * mid_blocks;
+        float part = 0.0f;
+        for (uint32_t b = lane; b < mid_blocks; b += 32u) {
+            part += DOT::block(down_row, slot_midq, b);
+        }
+        #pragma unroll
+        for (uint32_t mask = 16u; mask > 0u; mask >>= 1u) {
+            part += __shfl_xor_sync(0xffffffffu, part, mask);
+        }
+        acc += part;
+    }
+    if (lane == 0) out[(uint64_t)token * out_dim + row] = acc;
+}
+/* Tier side of the contract: one fully-reduced down projection per
+ * (token, slot), written unsummed so the primary can splice it into its
+ * canonical accumulation order. The instruction sequence mirrors the
+ * inline branch of moe_down_kernel exactly. */
+template <typename DOT>
+__global__ static void moe_down_per_slot_kernel(
+        float *out,                     /* [n_tok][n_used][out_dim] */
+        const pulsar_expert_ptrs *ptrs, /* [n_tok][n_used] */
+        const block_q8_K *midq,         /* [n_tok][n_used][mid_dim/256] */
+        uint32_t mid_blocks,
+        uint32_t out_dim,
+        uint32_t n_used,
+        uint32_t n_tok,
+        uint64_t row_bytes) {
+    const uint32_t lane = threadIdx.x;
+    const uint32_t row = blockIdx.x * blockDim.y + threadIdx.y;
+    const uint32_t sidx = blockIdx.y;   /* token * n_used + slot */
+    if (row >= out_dim || sidx >= n_tok * n_used) return;
+
+    const pulsar_expert_ptrs p = ptrs[sidx];
+    float acc = 0.0f;
+    if (p.down) {
+        const char *down_row = (const char *)p.down + (uint64_t)row * row_bytes;
+        const block_q8_K *slot_midq = midq + (uint64_t)sidx * mid_blocks;
         for (uint32_t b = lane; b < mid_blocks; b += 32u) {
             acc += DOT::block(down_row, slot_midq, b);
         }
+        #pragma unroll
+        for (uint32_t mask = 16u; mask > 0u; mask >>= 1u) {
+            acc += __shfl_xor_sync(0xffffffffu, acc, mask);
+        }
     }
-    #pragma unroll
-    for (uint32_t mask = 16u; mask > 0u; mask >>= 1u) {
-        acc += __shfl_xor_sync(0xffffffffu, acc, mask);
-    }
-    if (lane == 0) out[(uint64_t)token * out_dim + row] = acc;
+    if (lane == 0) out[(uint64_t)sidx * out_dim + row] = acc;
 }
 
 enum {
@@ -2320,6 +2397,7 @@ __global__ static void moe_pair_swiglu_grouped_kernel(
         uint32_t mid_dim,
         uint32_t n_used,
         uint64_t row_bytes,
+        float clamp,
         uint32_t act_op) {
     const uint32_t lane = threadIdx.x;
     const uint32_t row = blockIdx.x * blockDim.y + threadIdx.y;
@@ -2357,9 +2435,8 @@ __global__ static void moe_pair_swiglu_grouped_kernel(
         }
         if (lane == 0) {
             if (p.gate_b) ag += p.gate_b[row];
-            if (p.up_b) au += p.up_b[row];
             mid[((uint64_t)token * n_used + slot) * mid_dim + row] =
-                pulsar_glu(ag, au, act_op) * weights[(uint64_t)token * n_used + slot];
+                pulsar_glu_clamped(ag, au, act_op, clamp) * weights[(uint64_t)token * n_used + slot];
         }
     }
 }
@@ -2873,6 +2950,7 @@ __global__ static void moe_grouped_mma_kernel(
         uint32_t n_rows,                 /* mid_dim (pair) / out_dim (down) */
         uint32_t n_used,
         uint64_t row_bytes,
+        float clamp,
         uint32_t act_op) {
 #if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 800
     const uint32_t group = blockIdx.y;
@@ -3035,7 +3113,7 @@ __global__ static void moe_grouped_mma_kernel(
                         if (p.gate_b) g += p.gate_b[row];
                         if (p.up_b) u += p.up_b[row];
                         out[srow * n_rows + row] =
-                            pulsar_glu(g, u, act_op) * weights[srow];
+                            pulsar_glu_clamped(g, u, act_op, clamp) * weights[srow];
                     } else {
                         out[srow * n_rows + row] = accg[t][ci];
                     }
@@ -3078,7 +3156,7 @@ extern "C" int pulsar_moe_pair_swiglu_grouped(
         void *mid_dev, const void *gptrs_dev, const void *starts_dev,
         const void *pairs_dev, const void *weights_dev, const void *xq_dev,
         uint32_t in_dim, uint32_t mid_dim, uint32_t n_used, uint32_t n_group,
-        uint64_t row_bytes, uint32_t quant, uint32_t act_op) {
+        uint64_t row_bytes, float clamp, uint32_t quant, uint32_t act_op) {
     if (in_dim == 0 || in_dim % PULSAR_QK_K != 0 || mid_dim == 0 ||
         n_used == 0 || n_group == 0 || row_bytes == 0 ||
         2u * row_bytes * 4u > PULSAR_GROUP_SMEM) {
@@ -3094,7 +3172,7 @@ extern "C" int pulsar_moe_pair_swiglu_grouped(
                     (float *)mid_dev, (const pulsar_expert_ptrs *)gptrs_dev,   \
                     (const uint32_t *)starts_dev, (const uint32_t *)pairs_dev, \
                     (const float *)weights_dev, xq_dev,                        \
-                    in_blocks, mid_dim, n_used, row_bytes, act_op);            \
+                    in_blocks, mid_dim, n_used, row_bytes, clamp, act_op);            \
             return cuda_ok(cudaGetLastError(), "moe pair mma launch")
         PULSAR_MMA_PAIR(PULSAR_QUANT_IQ2_XXS, unpack_iq2_xxs);
         PULSAR_MMA_PAIR(PULSAR_QUANT_IQ2_XS, unpack_iq2_xs);
@@ -3124,7 +3202,7 @@ extern "C" int pulsar_moe_pair_swiglu_grouped(
             (float *)mid_dev, (const pulsar_expert_ptrs *)gptrs_dev,
             (const uint32_t *)starts_dev, (const uint32_t *)pairs_dev,
             (const float *)weights_dev, (const block_q8_K *)xq_dev,
-            in_blocks, mid_dim, n_used, row_bytes, act_op);
+            in_blocks, mid_dim, n_used, row_bytes, clamp, act_op);
     return cuda_ok(cudaGetLastError(), "moe pair swiglu grouped launch");
 }
 
@@ -3150,7 +3228,7 @@ extern "C" int pulsar_moe_down_grouped(
             moe_grouped_mma_kernel<1, U><<<mgrid, 256>>>(                      \
                     (float *)partial_dev, (const pulsar_expert_ptrs *)gptrs_dev, \
                     (const uint32_t *)starts_dev, (const uint32_t *)pairs_dev, \
-                    NULL, midq_dev, mid_blocks, out_dim, n_used, row_bytes, 0); \
+                    NULL, midq_dev, mid_blocks, out_dim, n_used, row_bytes, 0.0f, 0); \
             return cuda_ok(cudaGetLastError(), "moe down mma launch")
         PULSAR_MMA_DOWN(PULSAR_QUANT_IQ2_XXS, unpack_iq2_xxs);
         PULSAR_MMA_DOWN(PULSAR_QUANT_IQ2_XS, unpack_iq2_xs);
@@ -3492,6 +3570,7 @@ extern "C" int pulsar_moe_pair_swiglu(
         uint32_t n_used,
         uint32_t n_tok,
         uint64_t row_bytes,
+        float clamp,
         uint32_t quant,
         uint32_t act_op) {
     if (in_dim == 0 || mid_dim == 0 ||
@@ -3512,103 +3591,103 @@ extern "C" int pulsar_moe_pair_swiglu(
         moe_pair_swiglu_kernel<dot_q2_K><<<grid, block>>>(
                 (float *)mid_dev, (const pulsar_expert_ptrs *)ptrs_dev,
                 (const float *)weights_dev, (const block_q8_K *)xq_dev,
-                in_blocks, mid_dim, n_used, n_tok, row_bytes, act_op);
+                in_blocks, mid_dim, n_used, n_tok, row_bytes, clamp, act_op);
         break;
     case PULSAR_QUANT_IQ2_XXS:
         moe_pair_swiglu_kernel<dot_iq2_xxs><<<grid, block>>>(
                 (float *)mid_dev, (const pulsar_expert_ptrs *)ptrs_dev,
                 (const float *)weights_dev, (const block_q8_K *)xq_dev,
-                in_blocks, mid_dim, n_used, n_tok, row_bytes, act_op);
+                in_blocks, mid_dim, n_used, n_tok, row_bytes, clamp, act_op);
         break;
     case PULSAR_QUANT_Q4_K:
         moe_pair_swiglu_kernel<dot_q4_K><<<grid, block>>>(
                 (float *)mid_dev, (const pulsar_expert_ptrs *)ptrs_dev,
                 (const float *)weights_dev, (const block_q8_K *)xq_dev,
-                in_blocks, mid_dim, n_used, n_tok, row_bytes, act_op);
+                in_blocks, mid_dim, n_used, n_tok, row_bytes, clamp, act_op);
         break;
     case PULSAR_QUANT_Q5_K:
         moe_pair_swiglu_kernel<dot_q5_K><<<grid, block>>>(
                 (float *)mid_dev, (const pulsar_expert_ptrs *)ptrs_dev,
                 (const float *)weights_dev, (const block_q8_K *)xq_dev,
-                in_blocks, mid_dim, n_used, n_tok, row_bytes, act_op);
+                in_blocks, mid_dim, n_used, n_tok, row_bytes, clamp, act_op);
         break;
     case PULSAR_QUANT_Q6_K:
         moe_pair_swiglu_kernel<dot_q6_K><<<grid, block>>>(
                 (float *)mid_dev, (const pulsar_expert_ptrs *)ptrs_dev,
                 (const float *)weights_dev, (const block_q8_K *)xq_dev,
-                in_blocks, mid_dim, n_used, n_tok, row_bytes, act_op);
+                in_blocks, mid_dim, n_used, n_tok, row_bytes, clamp, act_op);
         break;
     case PULSAR_QUANT_Q3_K:
         moe_pair_swiglu_kernel<dot_q3_K><<<grid, block>>>(
                 (float *)mid_dev, (const pulsar_expert_ptrs *)ptrs_dev,
                 (const float *)weights_dev, (const block_q8_K *)xq_dev,
-                in_blocks, mid_dim, n_used, n_tok, row_bytes, act_op);
+                in_blocks, mid_dim, n_used, n_tok, row_bytes, clamp, act_op);
         break;
     case PULSAR_QUANT_IQ2_XS:
         moe_pair_swiglu_kernel<dot_iq2_xs><<<grid, block>>>(
                 (float *)mid_dev, (const pulsar_expert_ptrs *)ptrs_dev,
                 (const float *)weights_dev, (const block_q8_K *)xq_dev,
-                in_blocks, mid_dim, n_used, n_tok, row_bytes, act_op);
+                in_blocks, mid_dim, n_used, n_tok, row_bytes, clamp, act_op);
         break;
     case PULSAR_QUANT_IQ3_XXS:
         moe_pair_swiglu_kernel<dot_iq3_xxs><<<grid, block>>>(
                 (float *)mid_dev, (const pulsar_expert_ptrs *)ptrs_dev,
                 (const float *)weights_dev, (const block_q8_K *)xq_dev,
-                in_blocks, mid_dim, n_used, n_tok, row_bytes, act_op);
+                in_blocks, mid_dim, n_used, n_tok, row_bytes, clamp, act_op);
         break;
     case PULSAR_QUANT_Q4_0:
         moe_pair_swiglu_kernel<dot_q4_0><<<grid, block>>>(
                 (float *)mid_dev, (const pulsar_expert_ptrs *)ptrs_dev,
                 (const float *)weights_dev, (const block_q8_K *)xq_dev,
-                in_blocks, mid_dim, n_used, n_tok, row_bytes, act_op);
+                in_blocks, mid_dim, n_used, n_tok, row_bytes, clamp, act_op);
         break;
     case PULSAR_QUANT_Q5_1:
         moe_pair_swiglu_kernel<dot_q5_1><<<grid, block>>>(
                 (float *)mid_dev, (const pulsar_expert_ptrs *)ptrs_dev,
                 (const float *)weights_dev, (const block_q8_K *)xq_dev,
-                in_blocks, mid_dim, n_used, n_tok, row_bytes, act_op);
+                in_blocks, mid_dim, n_used, n_tok, row_bytes, clamp, act_op);
         break;
     case PULSAR_QUANT_Q8_0:
         moe_pair_swiglu_kernel<dot_q8_0><<<grid, block>>>(
                 (float *)mid_dev, (const pulsar_expert_ptrs *)ptrs_dev,
                 (const float *)weights_dev, (const block_q8_K *)xq_dev,
-                in_blocks, mid_dim, n_used, n_tok, row_bytes, act_op);
+                in_blocks, mid_dim, n_used, n_tok, row_bytes, clamp, act_op);
         break;
     case PULSAR_QUANT_IQ4_XS:
         moe_pair_swiglu_kernel<dot_iq4_xs><<<grid, block>>>(
                 (float *)mid_dev, (const pulsar_expert_ptrs *)ptrs_dev,
                 (const float *)weights_dev, (const block_q8_K *)xq_dev,
-                in_blocks, mid_dim, n_used, n_tok, row_bytes, act_op);
+                in_blocks, mid_dim, n_used, n_tok, row_bytes, clamp, act_op);
         break;
     case PULSAR_QUANT_IQ2_S:
         moe_pair_swiglu_kernel<dot_iq2_s><<<grid, block>>>(
                 (float *)mid_dev, (const pulsar_expert_ptrs *)ptrs_dev,
                 (const float *)weights_dev, (const block_q8_K *)xq_dev,
-                in_blocks, mid_dim, n_used, n_tok, row_bytes, act_op);
+                in_blocks, mid_dim, n_used, n_tok, row_bytes, clamp, act_op);
         break;
     case PULSAR_QUANT_IQ1_S:
         moe_pair_swiglu_kernel<dot_iq1_s><<<grid, block>>>(
                 (float *)mid_dev, (const pulsar_expert_ptrs *)ptrs_dev,
                 (const float *)weights_dev, (const block_q8_K *)xq_dev,
-                in_blocks, mid_dim, n_used, n_tok, row_bytes, act_op);
+                in_blocks, mid_dim, n_used, n_tok, row_bytes, clamp, act_op);
         break;
     case PULSAR_QUANT_IQ3_S:
         moe_pair_swiglu_kernel<dot_iq3_s><<<grid, block>>>(
                 (float *)mid_dev, (const pulsar_expert_ptrs *)ptrs_dev,
                 (const float *)weights_dev, (const block_q8_K *)xq_dev,
-                in_blocks, mid_dim, n_used, n_tok, row_bytes, act_op);
+                in_blocks, mid_dim, n_used, n_tok, row_bytes, clamp, act_op);
         break;
     case PULSAR_QUANT_IQ4_NL:
         moe_pair_swiglu_kernel<dot_iq4_nl><<<grid, block>>>(
                 (float *)mid_dev, (const pulsar_expert_ptrs *)ptrs_dev,
                 (const float *)weights_dev, (const block_q8_K *)xq_dev,
-                in_blocks, mid_dim, n_used, n_tok, row_bytes, act_op);
+                in_blocks, mid_dim, n_used, n_tok, row_bytes, clamp, act_op);
         break;
     case PULSAR_QUANT_MXFP4:
         moe_pair_swiglu_kernel<dot_mxfp4><<<grid, block>>>(
                 (float *)mid_dev, (const pulsar_expert_ptrs *)ptrs_dev,
                 (const float *)weights_dev, (const block_q8_K *)xq_dev,
-                in_blocks, mid_dim, n_used, n_tok, row_bytes, act_op);
+                in_blocks, mid_dim, n_used, n_tok, row_bytes, clamp, act_op);
         break;
     default:
         return 0;
@@ -3625,7 +3704,8 @@ extern "C" int pulsar_moe_down(
         uint32_t n_used,
         uint32_t n_tok,
         uint64_t row_bytes,
-        uint32_t quant) {
+        uint32_t quant,
+        const void *ext_dev /* f32 [n_tok][n_used][out_dim], null = no tier */) {
     if (mid_dim == 0 || out_dim == 0 ||
         n_used == 0 || n_tok == 0 || row_bytes == 0) {
         return 0;
@@ -3641,100 +3721,225 @@ extern "C" int pulsar_moe_down(
         moe_down_kernel<dot_q2_K><<<grid, block>>>(
                 (float *)out_dev, (const pulsar_expert_ptrs *)ptrs_dev,
                 (const block_q8_K *)midq_dev, mid_blocks, out_dim, n_used,
-                n_tok, row_bytes);
+                n_tok, row_bytes, (const float *)ext_dev);
         break;
     case PULSAR_QUANT_IQ2_XXS:
         moe_down_kernel<dot_iq2_xxs><<<grid, block>>>(
                 (float *)out_dev, (const pulsar_expert_ptrs *)ptrs_dev,
                 (const block_q8_K *)midq_dev, mid_blocks, out_dim, n_used,
-                n_tok, row_bytes);
+                n_tok, row_bytes, (const float *)ext_dev);
         break;
     case PULSAR_QUANT_Q4_K:
         moe_down_kernel<dot_q4_K><<<grid, block>>>(
                 (float *)out_dev, (const pulsar_expert_ptrs *)ptrs_dev,
                 (const block_q8_K *)midq_dev, mid_blocks, out_dim, n_used,
-                n_tok, row_bytes);
+                n_tok, row_bytes, (const float *)ext_dev);
         break;
     case PULSAR_QUANT_Q5_K:
         moe_down_kernel<dot_q5_K><<<grid, block>>>(
                 (float *)out_dev, (const pulsar_expert_ptrs *)ptrs_dev,
                 (const block_q8_K *)midq_dev, mid_blocks, out_dim, n_used,
-                n_tok, row_bytes);
+                n_tok, row_bytes, (const float *)ext_dev);
         break;
     case PULSAR_QUANT_Q6_K:
         moe_down_kernel<dot_q6_K><<<grid, block>>>(
                 (float *)out_dev, (const pulsar_expert_ptrs *)ptrs_dev,
                 (const block_q8_K *)midq_dev, mid_blocks, out_dim, n_used,
-                n_tok, row_bytes);
+                n_tok, row_bytes, (const float *)ext_dev);
         break;
     case PULSAR_QUANT_Q3_K:
         moe_down_kernel<dot_q3_K><<<grid, block>>>(
                 (float *)out_dev, (const pulsar_expert_ptrs *)ptrs_dev,
                 (const block_q8_K *)midq_dev, mid_blocks, out_dim, n_used,
-                n_tok, row_bytes);
+                n_tok, row_bytes, (const float *)ext_dev);
         break;
     case PULSAR_QUANT_IQ2_XS:
         moe_down_kernel<dot_iq2_xs><<<grid, block>>>(
                 (float *)out_dev, (const pulsar_expert_ptrs *)ptrs_dev,
                 (const block_q8_K *)midq_dev, mid_blocks, out_dim, n_used,
-                n_tok, row_bytes);
+                n_tok, row_bytes, (const float *)ext_dev);
         break;
     case PULSAR_QUANT_IQ3_XXS:
         moe_down_kernel<dot_iq3_xxs><<<grid, block>>>(
                 (float *)out_dev, (const pulsar_expert_ptrs *)ptrs_dev,
                 (const block_q8_K *)midq_dev, mid_blocks, out_dim, n_used,
-                n_tok, row_bytes);
+                n_tok, row_bytes, (const float *)ext_dev);
         break;
     case PULSAR_QUANT_Q4_0:
         moe_down_kernel<dot_q4_0><<<grid, block>>>(
                 (float *)out_dev, (const pulsar_expert_ptrs *)ptrs_dev,
                 (const block_q8_K *)midq_dev, mid_blocks, out_dim, n_used,
-                n_tok, row_bytes);
+                n_tok, row_bytes, (const float *)ext_dev);
         break;
     case PULSAR_QUANT_Q5_1:
         moe_down_kernel<dot_q5_1><<<grid, block>>>(
                 (float *)out_dev, (const pulsar_expert_ptrs *)ptrs_dev,
                 (const block_q8_K *)midq_dev, mid_blocks, out_dim, n_used,
-                n_tok, row_bytes);
+                n_tok, row_bytes, (const float *)ext_dev);
         break;
     case PULSAR_QUANT_Q8_0:
         moe_down_kernel<dot_q8_0><<<grid, block>>>(
                 (float *)out_dev, (const pulsar_expert_ptrs *)ptrs_dev,
                 (const block_q8_K *)midq_dev, mid_blocks, out_dim, n_used,
-                n_tok, row_bytes);
+                n_tok, row_bytes, (const float *)ext_dev);
         break;
     case PULSAR_QUANT_IQ4_XS:
         moe_down_kernel<dot_iq4_xs><<<grid, block>>>(
                 (float *)out_dev, (const pulsar_expert_ptrs *)ptrs_dev,
                 (const block_q8_K *)midq_dev, mid_blocks, out_dim, n_used,
-                n_tok, row_bytes);
+                n_tok, row_bytes, (const float *)ext_dev);
         break;
     case PULSAR_QUANT_IQ2_S:
         moe_down_kernel<dot_iq2_s><<<grid, block>>>(
                 (float *)out_dev, (const pulsar_expert_ptrs *)ptrs_dev,
                 (const block_q8_K *)midq_dev, mid_blocks, out_dim, n_used,
-                n_tok, row_bytes);
+                n_tok, row_bytes, (const float *)ext_dev);
         break;
     case PULSAR_QUANT_IQ1_S:
         moe_down_kernel<dot_iq1_s><<<grid, block>>>(
                 (float *)out_dev, (const pulsar_expert_ptrs *)ptrs_dev,
                 (const block_q8_K *)midq_dev, mid_blocks, out_dim, n_used,
-                n_tok, row_bytes);
+                n_tok, row_bytes, (const float *)ext_dev);
         break;
     case PULSAR_QUANT_IQ3_S:
         moe_down_kernel<dot_iq3_s><<<grid, block>>>(
                 (float *)out_dev, (const pulsar_expert_ptrs *)ptrs_dev,
                 (const block_q8_K *)midq_dev, mid_blocks, out_dim, n_used,
-                n_tok, row_bytes);
+                n_tok, row_bytes, (const float *)ext_dev);
         break;
     case PULSAR_QUANT_IQ4_NL:
         moe_down_kernel<dot_iq4_nl><<<grid, block>>>(
                 (float *)out_dev, (const pulsar_expert_ptrs *)ptrs_dev,
                 (const block_q8_K *)midq_dev, mid_blocks, out_dim, n_used,
-                n_tok, row_bytes);
+                n_tok, row_bytes, (const float *)ext_dev);
         break;
     case PULSAR_QUANT_MXFP4:
         moe_down_kernel<dot_mxfp4><<<grid, block>>>(
+                (float *)out_dev, (const pulsar_expert_ptrs *)ptrs_dev,
+                (const block_q8_K *)midq_dev, mid_blocks, out_dim, n_used,
+                n_tok, row_bytes, (const float *)ext_dev);
+        break;
+    default:
+        return 0;
+    }
+    return cuda_ok(cudaGetLastError(), "moe down launch");
+}
+extern "C" int pulsar_moe_down_per_slot(
+        void *out_dev,             /* f32 [n_tok][n_used][out_dim] */
+        const void *ptrs_dev,
+        const void *midq_dev,      /* q8_K [n_tok][n_used][mid_dim/256] */
+        uint32_t mid_dim,
+        uint32_t out_dim,
+        uint32_t n_used,
+        uint32_t n_tok,
+        uint64_t row_bytes,
+        uint32_t quant) {
+    if (mid_dim == 0 || out_dim == 0 ||
+        n_used == 0 || n_tok == 0 || row_bytes == 0) {
+        return 0;
+    }
+    const uint32_t mid_blocks = (mid_dim + PULSAR_QK_K - 1u) / PULSAR_QK_K;
+    dim3 block(32, 4, 1);
+    dim3 grid((out_dim + 3u) / 4u, n_tok * n_used, 1);
+    switch (quant) {
+    case PULSAR_QUANT_Q2_K:
+        moe_down_per_slot_kernel<dot_q2_K><<<grid, block>>>(
+                (float *)out_dev, (const pulsar_expert_ptrs *)ptrs_dev,
+                (const block_q8_K *)midq_dev, mid_blocks, out_dim, n_used,
+                n_tok, row_bytes);
+        break;
+    case PULSAR_QUANT_IQ2_XXS:
+        moe_down_per_slot_kernel<dot_iq2_xxs><<<grid, block>>>(
+                (float *)out_dev, (const pulsar_expert_ptrs *)ptrs_dev,
+                (const block_q8_K *)midq_dev, mid_blocks, out_dim, n_used,
+                n_tok, row_bytes);
+        break;
+    case PULSAR_QUANT_Q4_K:
+        moe_down_per_slot_kernel<dot_q4_K><<<grid, block>>>(
+                (float *)out_dev, (const pulsar_expert_ptrs *)ptrs_dev,
+                (const block_q8_K *)midq_dev, mid_blocks, out_dim, n_used,
+                n_tok, row_bytes);
+        break;
+    case PULSAR_QUANT_Q5_K:
+        moe_down_per_slot_kernel<dot_q5_K><<<grid, block>>>(
+                (float *)out_dev, (const pulsar_expert_ptrs *)ptrs_dev,
+                (const block_q8_K *)midq_dev, mid_blocks, out_dim, n_used,
+                n_tok, row_bytes);
+        break;
+    case PULSAR_QUANT_Q6_K:
+        moe_down_per_slot_kernel<dot_q6_K><<<grid, block>>>(
+                (float *)out_dev, (const pulsar_expert_ptrs *)ptrs_dev,
+                (const block_q8_K *)midq_dev, mid_blocks, out_dim, n_used,
+                n_tok, row_bytes);
+        break;
+    case PULSAR_QUANT_Q3_K:
+        moe_down_per_slot_kernel<dot_q3_K><<<grid, block>>>(
+                (float *)out_dev, (const pulsar_expert_ptrs *)ptrs_dev,
+                (const block_q8_K *)midq_dev, mid_blocks, out_dim, n_used,
+                n_tok, row_bytes);
+        break;
+    case PULSAR_QUANT_IQ2_XS:
+        moe_down_per_slot_kernel<dot_iq2_xs><<<grid, block>>>(
+                (float *)out_dev, (const pulsar_expert_ptrs *)ptrs_dev,
+                (const block_q8_K *)midq_dev, mid_blocks, out_dim, n_used,
+                n_tok, row_bytes);
+        break;
+    case PULSAR_QUANT_IQ3_XXS:
+        moe_down_per_slot_kernel<dot_iq3_xxs><<<grid, block>>>(
+                (float *)out_dev, (const pulsar_expert_ptrs *)ptrs_dev,
+                (const block_q8_K *)midq_dev, mid_blocks, out_dim, n_used,
+                n_tok, row_bytes);
+        break;
+    case PULSAR_QUANT_Q4_0:
+        moe_down_per_slot_kernel<dot_q4_0><<<grid, block>>>(
+                (float *)out_dev, (const pulsar_expert_ptrs *)ptrs_dev,
+                (const block_q8_K *)midq_dev, mid_blocks, out_dim, n_used,
+                n_tok, row_bytes);
+        break;
+    case PULSAR_QUANT_Q5_1:
+        moe_down_per_slot_kernel<dot_q5_1><<<grid, block>>>(
+                (float *)out_dev, (const pulsar_expert_ptrs *)ptrs_dev,
+                (const block_q8_K *)midq_dev, mid_blocks, out_dim, n_used,
+                n_tok, row_bytes);
+        break;
+    case PULSAR_QUANT_Q8_0:
+        moe_down_per_slot_kernel<dot_q8_0><<<grid, block>>>(
+                (float *)out_dev, (const pulsar_expert_ptrs *)ptrs_dev,
+                (const block_q8_K *)midq_dev, mid_blocks, out_dim, n_used,
+                n_tok, row_bytes);
+        break;
+    case PULSAR_QUANT_IQ4_XS:
+        moe_down_per_slot_kernel<dot_iq4_xs><<<grid, block>>>(
+                (float *)out_dev, (const pulsar_expert_ptrs *)ptrs_dev,
+                (const block_q8_K *)midq_dev, mid_blocks, out_dim, n_used,
+                n_tok, row_bytes);
+        break;
+    case PULSAR_QUANT_IQ2_S:
+        moe_down_per_slot_kernel<dot_iq2_s><<<grid, block>>>(
+                (float *)out_dev, (const pulsar_expert_ptrs *)ptrs_dev,
+                (const block_q8_K *)midq_dev, mid_blocks, out_dim, n_used,
+                n_tok, row_bytes);
+        break;
+    case PULSAR_QUANT_IQ1_S:
+        moe_down_per_slot_kernel<dot_iq1_s><<<grid, block>>>(
+                (float *)out_dev, (const pulsar_expert_ptrs *)ptrs_dev,
+                (const block_q8_K *)midq_dev, mid_blocks, out_dim, n_used,
+                n_tok, row_bytes);
+        break;
+    case PULSAR_QUANT_IQ3_S:
+        moe_down_per_slot_kernel<dot_iq3_s><<<grid, block>>>(
+                (float *)out_dev, (const pulsar_expert_ptrs *)ptrs_dev,
+                (const block_q8_K *)midq_dev, mid_blocks, out_dim, n_used,
+                n_tok, row_bytes);
+        break;
+    case PULSAR_QUANT_IQ4_NL:
+        moe_down_per_slot_kernel<dot_iq4_nl><<<grid, block>>>(
+                (float *)out_dev, (const pulsar_expert_ptrs *)ptrs_dev,
+                (const block_q8_K *)midq_dev, mid_blocks, out_dim, n_used,
+                n_tok, row_bytes);
+        break;
+    case PULSAR_QUANT_MXFP4:
+        moe_down_per_slot_kernel<dot_mxfp4><<<grid, block>>>(
                 (float *)out_dev, (const pulsar_expert_ptrs *)ptrs_dev,
                 (const block_q8_K *)midq_dev, mid_blocks, out_dim, n_used,
                 n_tok, row_bytes);
@@ -3742,7 +3947,7 @@ extern "C" int pulsar_moe_down(
     default:
         return 0;
     }
-    return cuda_ok(cudaGetLastError(), "moe down launch");
+    return cuda_ok(cudaGetLastError(), "moe down per-slot launch");
 }
 
 /* ---- MoE selftest: random quantized slabs vs a host dequant reference -- */
@@ -4553,9 +4758,9 @@ static int moe_selftest_one2(uint32_t quant, const char *name, uint32_t mid_dim)
     ok = ok && cuda_ok(cudaMemcpy(ptrs_dev, ptrs, sizeof(ptrs), cudaMemcpyHostToDevice), "ptrs h2d") &&
          pulsar_moe_pair_swiglu(mid_dev, ptrs_dev, w_dev, xq_dev,
                                 in_dim, mid_dim, n_used, n_tok,
-                                pair_row_bytes, quant, 0) &&
+                                pair_row_bytes, 0.0f, quant, 0) &&
          pulsar_moe_down(out_dev, ptrs_dev, midq_dev, mid_dim, out_dim,
-                         n_used, n_tok, down_row_bytes, quant) &&
+                         n_used, n_tok, down_row_bytes, quant, nullptr) &&
          cuda_ok(cudaDeviceSynchronize(), "sync") &&
          cuda_ok(cudaMemcpy(mid_gpu, mid_dev, (uint64_t)n_tok * n_used * mid_dim * sizeof(float), cudaMemcpyDeviceToHost), "mid d2h") &&
          cuda_ok(cudaMemcpy(out_gpu, out_dev, (uint64_t)n_tok * out_dim * sizeof(float), cudaMemcpyDeviceToHost), "out d2h");
@@ -4659,7 +4864,7 @@ static int moe_selftest_one2(uint32_t quant, const char *name, uint32_t mid_dim)
              cuda_ok(cudaMemset(partial_d, 0, partial_bytes), "partial clear") &&
              pulsar_moe_pair_swiglu_grouped(mid_dev, gp_d, st_d, pr_d, w_dev, xq_dev,
                                             in_dim, mid_dim, n_used, n_group,
-                                            pair_row_bytes, quant, 0) &&
+                                            pair_row_bytes, 0.0f, quant, 0) &&
              pulsar_moe_down_grouped(partial_d, gp_d, st_d, pr_d, midq_dev,
                                      mid_dim, out_dim, n_used, n_group,
                                      down_row_bytes, quant) &&
@@ -4832,6 +5037,11 @@ __global__ static void swiglu_kernel(
     if (i >= n) return;
     float g = gate[i];
     float u = up[i];
+    if (act_op == 5u) {
+        /* bailingmoe3: clamp lands AFTER silu (see pulsar_glu_clamped) */
+        out[i] = pulsar_glu_clamped(g, u, act_op, clamp) * weight;
+        return;
+    }
     if (clamp > 1.0e-6f) {
         g = fminf(g, clamp);
         u = fminf(fmaxf(u, -clamp), clamp);
@@ -5751,3 +5961,4 @@ extern "C" int pulsar_mla_selftest(void) {
 #include "dsv4_kernels.inc"
 #include "qwen35_kernels.inc"
 #include "k3_kernels.inc"
+#include "bailing_kernels.inc"

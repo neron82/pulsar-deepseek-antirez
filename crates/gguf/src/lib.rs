@@ -277,11 +277,17 @@ impl Gguf {
         }
         let tensor_count = c.u64()?;
         if tensor_count > 1 << 20 {
-            return Err(Error::TooMany { what: "tensor", count: tensor_count });
+            return Err(Error::TooMany {
+                what: "tensor",
+                count: tensor_count,
+            });
         }
         let kv_count = c.u64()?;
         if kv_count > 1 << 20 {
-            return Err(Error::TooMany { what: "metadata kv", count: kv_count });
+            return Err(Error::TooMany {
+                what: "metadata kv",
+                count: kv_count,
+            });
         }
 
         let mut metadata = HashMap::with_capacity(kv_count as usize);
@@ -297,7 +303,10 @@ impl Gguf {
             let name = c.string()?;
             let n_dims = c.u32()?;
             if n_dims > 8 {
-                return Err(Error::TooMany { what: "tensor dim", count: n_dims as u64 });
+                return Err(Error::TooMany {
+                    what: "tensor dim",
+                    count: n_dims as u64,
+                });
             }
             let mut dims = Vec::with_capacity(n_dims as usize);
             for _ in 0..n_dims {
@@ -305,7 +314,12 @@ impl Gguf {
             }
             let ty_id = c.u32()?;
             let offset = c.u64()?;
-            tensors.push(TensorInfo { name, dims, ty: TensorType::from_id(ty_id), offset });
+            tensors.push(TensorInfo {
+                name,
+                dims,
+                ty: TensorType::from_id(ty_id),
+                offset,
+            });
         }
 
         let alignment = metadata
@@ -451,7 +465,10 @@ impl<'a> Cursor<'a> {
                 let elem_ty = self.u32()?;
                 let count = self.u64()?;
                 if count > 1 << 26 {
-                    return Err(Error::TooMany { what: "array element", count });
+                    return Err(Error::TooMany {
+                        what: "array element",
+                        count,
+                    });
                 }
                 let mut v = Vec::with_capacity(count.min(1 << 16) as usize);
                 for _ in 0..count {
@@ -484,7 +501,11 @@ pub fn split_shard_names(path: &std::path::Path) -> Option<Vec<std::path::PathBu
         return None;
     }
     let dir = path.parent()?;
-    Some((1..=count).map(|i| dir.join(format!("{prefix}-{i:05}-of-{count:05}.gguf"))).collect())
+    Some(
+        (1..=count)
+            .map(|i| dir.join(format!("{prefix}-{i:05}-of-{count:05}.gguf")))
+            .collect(),
+    )
 }
 
 /// Expand "...-00001-of-000NN.gguf" to the full shard list (all must

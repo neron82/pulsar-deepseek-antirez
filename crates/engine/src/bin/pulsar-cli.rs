@@ -62,7 +62,12 @@ fn run_chat(
     let markers = tokenizer::ChatMarkers::resolve(tok)?;
     // sampling defaults from the gguf's own metadata (Hy3 ships 0.9/1.0)
     let meta_f = |k: &str, d: f32| {
-        model.gguf.metadata.get(k).and_then(gguf::Value::as_f32).unwrap_or(d)
+        model
+            .gguf
+            .metadata
+            .get(k)
+            .and_then(gguf::Value::as_f32)
+            .unwrap_or(d)
     };
     let temp = temp.unwrap_or_else(|| meta_f("general.sampling.temp", 0.9));
     let top_p = top_p.unwrap_or_else(|| meta_f("general.sampling.top_p", 1.0));
@@ -121,7 +126,10 @@ fn run_chat(
             |id| {
                 let stop = markers.is_stop(id);
                 if stop && std::env::var_os("PULSAR_DEBUG_IDS").is_some() {
-                    eprintln!("pulsar chat: stop token {id} (eos {}, eot {:?})", markers.eos, markers.eot);
+                    eprintln!(
+                        "pulsar chat: stop token {id} (eos {}, eot {:?})",
+                        markers.eos, markers.eot
+                    );
                 }
                 stop
             },
@@ -177,7 +185,9 @@ fn run() -> engine::Result {
             "--bos" => bos = Some(true),
             "--dump-logits" => dump_logits = Some(need("--dump-logits")?),
             "--teacher-force" => teacher_force = true,
-            "--decode-consistency" => decode_consistency = Some(need("--decode-consistency")?.parse::<usize>()?),
+            "--decode-consistency" => {
+                decode_consistency = Some(need("--decode-consistency")?.parse::<usize>()?)
+            }
             "--chat" => chat = true,
             "--system" => system = Some(need("--system")?),
             "--temp" => temp = Some(need("--temp")?.parse::<f32>()?),
@@ -219,12 +229,25 @@ fn run() -> engine::Result {
 
     if chat {
         return run_chat(
-            &model, &tok, ctx, system, temp, top_p, min_p, top_k, repeat_penalty, seed, n_predict,
+            &model,
+            &tok,
+            ctx,
+            system,
+            temp,
+            top_p,
+            min_p,
+            top_k,
+            repeat_penalty,
+            seed,
+            n_predict,
         );
     }
 
     let prompt_ids: Vec<u32> = match (tokens_arg, prompt) {
-        (Some(t), _) => t.split(',').map(|s| s.trim().parse()).collect::<std::result::Result<_, _>>()?,
+        (Some(t), _) => t
+            .split(',')
+            .map(|s| s.trim().parse())
+            .collect::<std::result::Result<_, _>>()?,
         (None, Some(p)) => {
             let mut ids = Vec::new();
             if bos.unwrap_or(tok.add_bos) {
@@ -262,7 +285,12 @@ fn run() -> engine::Result {
                 .iter()
                 .map(|&t| format!("[{},{}]", t, l[t as usize]))
                 .collect();
-            println!("{{\"pos\":{},\"after\":{},\"top\":[{}]}}", i, id, entries.join(","));
+            println!(
+                "{{\"pos\":{},\"after\":{},\"top\":[{}]}}",
+                i,
+                id,
+                entries.join(",")
+            );
         }
         return Ok(());
     }
@@ -371,7 +399,8 @@ fn run() -> engine::Result {
     // loop lives there); greedy-only, so the one-shot default applies
     if (std::env::var("PULSAR_MTP").ok().as_deref() == Some("1")
         || std::env::var("PULSAR_NGRAM").is_ok())
-        && dump_logits.is_none() {
+        && dump_logits.is_none()
+    {
         let mut generated: Vec<u32> = Vec::new();
         let mut t_first: Option<std::time::Instant> = None;
         let mut sampler = engine::Sampler::new(0.0, 1.0, 0.0, 1);
@@ -420,7 +449,11 @@ fn run() -> engine::Result {
         let tc = std::time::Instant::now();
         logits = model.forward_batch(&mut st, chunk, pos0, last)?;
         if prof_chunks {
-            eprintln!("pulsar: prefill chunk @{pos0} len {} in {:.2}s", chunk.len(), tc.elapsed().as_secs_f64());
+            eprintln!(
+                "pulsar: prefill chunk @{pos0} len {} in {:.2}s",
+                chunk.len(),
+                tc.elapsed().as_secs_f64()
+            );
         }
         pos0 += chunk.len() as u32;
     }

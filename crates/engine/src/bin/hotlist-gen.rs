@@ -9,7 +9,9 @@ fn main() {}
 
 #[cfg(target_os = "linux")]
 fn main() {
-    let path = std::env::args().nth(1).expect("usage: hotlist-gen <model.gguf>");
+    let path = std::env::args()
+        .nth(1)
+        .expect("usage: hotlist-gen <model.gguf>");
     let text = engine::hotlist_text(std::path::Path::new(&path)).expect("hotlist");
     print!("{text}");
 }

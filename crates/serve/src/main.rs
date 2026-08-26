@@ -59,8 +59,7 @@ const WARM_SAVE_TOUCHES: u64 = 250_000;
 /// warm save runs in normal context (a signal handler cannot touch the
 /// engine or the heap). SIGTERM is not intercepted - kill -9 or a
 /// supervisor stop loses the shutdown save, only the periodic one.
-static WARM_SHUTDOWN: std::sync::atomic::AtomicBool =
-    std::sync::atomic::AtomicBool::new(false);
+static WARM_SHUTDOWN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 /// Largest context whose KV complex still fits VRAM, projected from the
 /// live cost per position (KV + rope tail + DSA indexer keys scale
@@ -173,13 +172,15 @@ fn run() -> engine::Result {
     // Without the flag this stays None, no /mcp/* routes match, no tools are
     // injected, the webui tab stays hidden — zero behavioral change.
     let mcp = if webui_mcp_proxy {
-        let cfg_path =
-            std::path::PathBuf::from(mcp_config.as_deref().unwrap_or("mcp.json"));
+        let cfg_path = std::path::PathBuf::from(mcp_config.as_deref().unwrap_or("mcp.json"));
         let m = mcp::McpHub::new(Some(&cfg_path));
         m.connect_all();
         eprintln!(
             "pulsar-serve: --webui-mcp-proxy enabled ({} server(s) configured)",
-            m.status_json()["servers"].as_array().map(|a| a.len()).unwrap_or(0)
+            m.status_json()["servers"]
+                .as_array()
+                .map(|a| a.len())
+                .unwrap_or(0)
         );
         Some(m)
     } else {
@@ -218,7 +219,10 @@ fn run() -> engine::Result {
                 Ok(h) => {
                     eprintln!(
                         "pulsar-serve: prefix restored from {} ({} tokens, {} ckpts, {:.1}s)",
-                        pp.display(), h.len(), st.ckpt_count(), t0.elapsed().as_secs_f32()
+                        pp.display(),
+                        h.len(),
+                        st.ckpt_count(),
+                        t0.elapsed().as_secs_f32()
                     );
                     hist = h;
                 }
@@ -359,9 +363,12 @@ fn run() -> engine::Result {
             }
 
             match (method.as_str(), path.as_str()) {
-                ("GET", "/") | ("GET", "/index.html") => {
-                    respond_bytes(&mut stream, 200, "text/html; charset=utf-8", WEBUI_HTML.as_bytes())
-                }
+                ("GET", "/") | ("GET", "/index.html") => respond_bytes(
+                    &mut stream,
+                    200,
+                    "text/html; charset=utf-8",
+                    WEBUI_HTML.as_bytes(),
+                ),
                 ("GET", "/favicon.ico") | ("GET", "/favicon.svg") => {
                     respond_bytes(&mut stream, 200, "image/svg+xml", FAVICON_SVG.as_bytes())
                 }
@@ -386,14 +393,18 @@ fn run() -> engine::Result {
                     let tiers: Vec<_> = s
                         .tiers
                         .iter()
-                        .map(|t| serde_json::json!({"dev": t.dev, "bytes": t.bytes, "hits": t.hits}))
+                        .map(
+                            |t| serde_json::json!({"dev": t.dev, "bytes": t.bytes, "hits": t.hits}),
+                        )
                         .collect();
                     let gpus: Vec<_> = gpu_info()
                         .into_iter()
                         .enumerate()
-                        .map(|(i, (name, total, used))| serde_json::json!({
-                            "dev": i, "name": name, "vram_used": used, "vram_total": total,
-                        }))
+                        .map(|(i, (name, total, used))| {
+                            serde_json::json!({
+                                "dev": i, "name": name, "vram_used": used, "vram_total": total,
+                            })
+                        })
                         .collect();
                     // model residency: VRAM (resident tiers + slab cache), RAM (host
                     // cache), disk (the streamed remainder of the gguf on disk)
@@ -630,11 +641,9 @@ fn run() -> engine::Result {
                     // safe only because it rejected every '/'. Verify
                     // containment after canonicalizing, which also
                     // settles symlinks.
-                    let contained = || {
-                        match (target.canonicalize(), base.canonicalize()) {
-                            (Ok(t), Ok(b)) => t.starts_with(&b),
-                            _ => false,
-                        }
+                    let contained = || match (target.canonicalize(), base.canonicalize()) {
+                        (Ok(t), Ok(b)) => t.starts_with(&b),
+                        _ => false,
                     };
                     let ok = !name.is_empty()
                         && !std::path::Path::new(name).is_absolute()
@@ -645,7 +654,11 @@ fn run() -> engine::Result {
                         && target.is_file()
                         && contained();
                     if !ok {
-                        respond_json(&mut stream, 400, &serde_json::json!({"error": {"message": "invalid or unknown model"}}))
+                        respond_json(
+                            &mut stream,
+                            400,
+                            &serde_json::json!({"error": {"message": "invalid or unknown model"}}),
+                        )
                     } else {
                         respond_json(&mut stream, 200, &serde_json::json!({"reloading": name}))?;
                         let _ = std::io::Write::flush(&mut stream);
@@ -660,10 +673,20 @@ fn run() -> engine::Result {
                 ("POST", "/cpu_lane") => {
                     let req: serde_json::Value = serde_json::from_slice(&body).unwrap_or_default();
                     let enabled = req["enabled"].as_bool().unwrap_or(false);
-                    respond_json(&mut stream, 200, &serde_json::json!({"reloading": true, "cpu_lane": enabled}))?;
+                    respond_json(
+                        &mut stream,
+                        200,
+                        &serde_json::json!({"reloading": true, "cpu_lane": enabled}),
+                    )?;
                     let _ = std::io::Write::flush(&mut stream);
                     eprintln!("pulsar-serve: CPU lane -> {enabled}, re-exec");
-                    let err = reexec(std::path::Path::new(&model_path), enabled, None, mtp_on(), None);
+                    let err = reexec(
+                        std::path::Path::new(&model_path),
+                        enabled,
+                        None,
+                        mtp_on(),
+                        None,
+                    );
                     eprintln!("pulsar-serve: re-exec failed: {err}");
                     std::process::exit(1);
                 }
@@ -672,10 +695,20 @@ fn run() -> engine::Result {
                 ("POST", "/mtp") => {
                     let req: serde_json::Value = serde_json::from_slice(&body).unwrap_or_default();
                     let enabled = req["enabled"].as_bool().unwrap_or(false);
-                    respond_json(&mut stream, 200, &serde_json::json!({"reloading": true, "mtp": enabled}))?;
+                    respond_json(
+                        &mut stream,
+                        200,
+                        &serde_json::json!({"reloading": true, "mtp": enabled}),
+                    )?;
                     let _ = std::io::Write::flush(&mut stream);
                     eprintln!("pulsar-serve: MTP -> {enabled}, re-exec");
-                    let err = reexec(std::path::Path::new(&model_path), cpu_lane_on(), None, enabled, None);
+                    let err = reexec(
+                        std::path::Path::new(&model_path),
+                        cpu_lane_on(),
+                        None,
+                        enabled,
+                        None,
+                    );
                     eprintln!("pulsar-serve: re-exec failed: {err}");
                     std::process::exit(1);
                 }
@@ -685,16 +718,31 @@ fn run() -> engine::Result {
                 ("POST", "/kv") => {
                     let req: serde_json::Value = serde_json::from_slice(&body).unwrap_or_default();
                     let want = req["format"].as_str().unwrap_or("auto").to_string();
-                    const KV_FORMATS: [&str; 9] =
-                        ["auto", "f32", "fp8", "fp16", "int8", "q8_0", "q4_0", "turbo4", "turbo8"];
+                    const KV_FORMATS: [&str; 9] = [
+                        "auto", "f32", "fp8", "fp16", "int8", "q8_0", "q4_0", "turbo4", "turbo8",
+                    ];
                     if !KV_FORMATS.contains(&want.as_str()) {
-                        respond_json(&mut stream, 400, &serde_json::json!({"error": {"message":
-                            format!("unknown KV format {want} (one of {KV_FORMATS:?})")}}))
+                        respond_json(
+                            &mut stream,
+                            400,
+                            &serde_json::json!({"error": {"message":
+                            format!("unknown KV format {want} (one of {KV_FORMATS:?})")}}),
+                        )
                     } else {
-                        respond_json(&mut stream, 200, &serde_json::json!({"reloading": true, "kv": want}))?;
+                        respond_json(
+                            &mut stream,
+                            200,
+                            &serde_json::json!({"reloading": true, "kv": want}),
+                        )?;
                         let _ = std::io::Write::flush(&mut stream);
                         eprintln!("pulsar-serve: PULSAR_KV -> {want}, re-exec");
-                        let err = reexec(std::path::Path::new(&model_path), cpu_lane_on(), None, mtp_on(), Some(&want));
+                        let err = reexec(
+                            std::path::Path::new(&model_path),
+                            cpu_lane_on(),
+                            None,
+                            mtp_on(),
+                            Some(&want),
+                        );
                         eprintln!("pulsar-serve: re-exec failed: {err}");
                         std::process::exit(1);
                     }
@@ -707,19 +755,37 @@ fn run() -> engine::Result {
                     let fs = st.stats();
                     let fit = ctx_fit(fs.ctx, fs.kv_bytes, fs.kv_compact, fs.kv_headroom);
                     if !(512..=ctx_model_max as u32).contains(&n) {
-                        respond_json(&mut stream, 400, &serde_json::json!({"error": {"message":
-                            format!("ctx out of range (512..{ctx_model_max}, the checkpoint's trained context)")}}))
+                        respond_json(
+                            &mut stream,
+                            400,
+                            &serde_json::json!({"error": {"message":
+                            format!("ctx out of range (512..{ctx_model_max}, the checkpoint's trained context)")}}),
+                        )
                     } else if n > fit {
                         // Refuse rather than re-exec into an OOM: the re-exec
                         // replaces this process, so a failed load leaves the
                         // user with no server at all.
-                        respond_json(&mut stream, 400, &serde_json::json!({"error": {"message":
-                            format!("ctx {n} needs more KV than VRAM has free; largest that fits now is {fit}")}}))
+                        respond_json(
+                            &mut stream,
+                            400,
+                            &serde_json::json!({"error": {"message":
+                            format!("ctx {n} needs more KV than VRAM has free; largest that fits now is {fit}")}}),
+                        )
                     } else {
-                        respond_json(&mut stream, 200, &serde_json::json!({"reloading": true, "ctx": n}))?;
+                        respond_json(
+                            &mut stream,
+                            200,
+                            &serde_json::json!({"reloading": true, "ctx": n}),
+                        )?;
                         let _ = std::io::Write::flush(&mut stream);
                         eprintln!("pulsar-serve: ctx -> {n}, re-exec");
-                        let err = reexec(std::path::Path::new(&model_path), cpu_lane_on(), Some(n), mtp_on(), None);
+                        let err = reexec(
+                            std::path::Path::new(&model_path),
+                            cpu_lane_on(),
+                            Some(n),
+                            mtp_on(),
+                            None,
+                        );
                         eprintln!("pulsar-serve: re-exec failed: {err}");
                         std::process::exit(1);
                     }
@@ -765,11 +831,12 @@ fn run() -> engine::Result {
                 },
                 ("POST", "/mcp/server") => match &mcp {
                     Some(m) => {
-                        let v: serde_json::Value = serde_json::from_slice(&body).unwrap_or_default();
+                        let v: serde_json::Value =
+                            serde_json::from_slice(&body).unwrap_or_default();
                         let name = v["name"].as_str().unwrap_or("").to_string();
-                        let cfg = v
-                            .get("config")
-                            .and_then(|c| serde_json::from_value::<mcp::McpServerCfg>(c.clone()).ok());
+                        let cfg = v.get("config").and_then(|c| {
+                            serde_json::from_value::<mcp::McpServerCfg>(c.clone()).ok()
+                        });
                         if name.is_empty() || cfg.is_none() {
                             respond_json(
                                 &mut stream,
@@ -789,7 +856,8 @@ fn run() -> engine::Result {
                 },
                 ("POST", "/mcp/server/delete") => match &mcp {
                     Some(m) => {
-                        let v: serde_json::Value = serde_json::from_slice(&body).unwrap_or_default();
+                        let v: serde_json::Value =
+                            serde_json::from_slice(&body).unwrap_or_default();
                         if let Some(name) = v["name"].as_str() {
                             m.remove_server(name);
                         }
@@ -803,8 +871,11 @@ fn run() -> engine::Result {
                 },
                 ("POST", "/mcp/toggle") => match &mcp {
                     Some(m) => {
-                        let v: serde_json::Value = serde_json::from_slice(&body).unwrap_or_default();
-                        if let (Some(tool), Some(disabled)) = (v["tool"].as_str(), v["disabled"].as_bool()) {
+                        let v: serde_json::Value =
+                            serde_json::from_slice(&body).unwrap_or_default();
+                        if let (Some(tool), Some(disabled)) =
+                            (v["tool"].as_str(), v["disabled"].as_bool())
+                        {
                             m.toggle(tool, disabled);
                         }
                         respond_json(&mut stream, 200, &serde_json::json!({"ok": true}))
@@ -824,9 +895,8 @@ fn run() -> engine::Result {
         })();
         if let Err(e) = result {
             eprintln!("pulsar-serve: request failed: {e}");
-            let _ = stream.write_all(
-                b"HTTP/1.1 500 Internal Server Error\r\ncontent-length: 0\r\n\r\n",
-            );
+            let _ = stream
+                .write_all(b"HTTP/1.1 500 Internal Server Error\r\ncontent-length: 0\r\n\r\n");
         }
         // persist the prefill investment once it has grown meaningfully;
         // a save costs seconds, a lost prefix costs a 20-40 min re-prefill
@@ -837,7 +907,8 @@ fn run() -> engine::Result {
                     Ok(()) => {
                         eprintln!(
                             "pulsar-serve: prefix saved ({} tokens, {:.1}s)",
-                            hist.len(), t0.elapsed().as_secs_f32()
+                            hist.len(),
+                            t0.elapsed().as_secs_f32()
                         );
                         last_saved = hist.len();
                     }
@@ -856,7 +927,8 @@ fn run() -> engine::Result {
                     Ok(()) => {
                         eprintln!(
                             "pulsar-serve: warm census saved ({} entries, {:.2}s)",
-                            st.census_entry_count(), t0.elapsed().as_secs_f32()
+                            st.census_entry_count(),
+                            t0.elapsed().as_secs_f32()
                         );
                         st.commit_warm_seeds();
                         warm_last_touch = total;
@@ -971,9 +1043,12 @@ mod tests {
         assert!(host_allowed(Some("localhost:11435"), &allowed));
         assert!(host_allowed(Some("LocalHost:11435"), &allowed)); // Host is case-insensitive
         assert!(host_allowed(None, &allowed)); // HTTP/1.0 client
-        // DNS rebinding: attacker's domain resolved to 127.0.0.1. Origin and
-        // Host agree, so origin_ok alone would have let this through.
-        assert!(origin_ok(Some("http://evil.example:11435"), Some("evil.example:11435")));
+                                               // DNS rebinding: attacker's domain resolved to 127.0.0.1. Origin and
+                                               // Host agree, so origin_ok alone would have let this through.
+        assert!(origin_ok(
+            Some("http://evil.example:11435"),
+            Some("evil.example:11435")
+        ));
         assert!(!host_allowed(Some("evil.example:11435"), &allowed));
         // right name, wrong port is a different origin
         assert!(!host_allowed(Some("127.0.0.1:9999"), &allowed));
@@ -992,12 +1067,24 @@ mod tests {
         // non-browser clients send no Origin at all
         assert!(origin_ok(None, Some("127.0.0.1:8080")));
         // our own web UI, served from the same host:port
-        assert!(origin_ok(Some("http://127.0.0.1:8080"), Some("127.0.0.1:8080")));
-        assert!(origin_ok(Some("https://box.tail1234.ts.net"), Some("box.tail1234.ts.net")));
+        assert!(origin_ok(
+            Some("http://127.0.0.1:8080"),
+            Some("127.0.0.1:8080")
+        ));
+        assert!(origin_ok(
+            Some("https://box.tail1234.ts.net"),
+            Some("box.tail1234.ts.net")
+        ));
         // a drive-by page: this is the one that used to reach /mcp/server
-        assert!(!origin_ok(Some("https://evil.example"), Some("127.0.0.1:8080")));
+        assert!(!origin_ok(
+            Some("https://evil.example"),
+            Some("127.0.0.1:8080")
+        ));
         // same host, different port is still a different origin
-        assert!(!origin_ok(Some("http://127.0.0.1:9999"), Some("127.0.0.1:8080")));
+        assert!(!origin_ok(
+            Some("http://127.0.0.1:9999"),
+            Some("127.0.0.1:8080")
+        ));
         // sandboxed iframe / file:// page
         assert!(!origin_ok(Some("null"), Some("127.0.0.1:8080")));
         // malformed / absent Host cannot be matched against
@@ -1121,7 +1208,13 @@ fn pretty_model_name(name: &str) -> String {
 
 /// the caller to be a .gguf inside the current model's directory.
 #[cfg(target_os = "linux")]
-fn reexec(newmodel: &std::path::Path, cpu_lane: bool, new_ctx: Option<u32>, mtp: bool, kv: Option<&str>) -> std::io::Error {
+fn reexec(
+    newmodel: &std::path::Path,
+    cpu_lane: bool,
+    new_ctx: Option<u32>,
+    mtp: bool,
+    kv: Option<&str>,
+) -> std::io::Error {
     use std::os::unix::process::CommandExt;
     let args: Vec<String> = std::env::args().collect();
     let mut cmd = std::process::Command::new(&args[0]);
@@ -1135,8 +1228,12 @@ fn reexec(newmodel: &std::path::Path, cpu_lane: bool, new_ctx: Option<u32>, mtp:
             saw_ctx = true;
             cmd.arg("--ctx");
             match new_ctx {
-                Some(c) => { cmd.arg(c.to_string()); }
-                None => { cmd.arg(&args[i + 1]); }
+                Some(c) => {
+                    cmd.arg(c.to_string());
+                }
+                None => {
+                    cmd.arg(&args[i + 1]);
+                }
             }
             i += 2;
         } else {
@@ -1160,8 +1257,12 @@ fn reexec(newmodel: &std::path::Path, cpu_lane: bool, new_ctx: Option<u32>, mtp:
     // KV storage format. None = keep whatever this process was given;
     // Some("auto") = clear it so the engine's size-aware default decides.
     match kv {
-        Some("auto") => { cmd.env_remove("PULSAR_KV"); }
-        Some(v) => { cmd.env("PULSAR_KV", v); }
+        Some("auto") => {
+            cmd.env_remove("PULSAR_KV");
+        }
+        Some(v) => {
+            cmd.env("PULSAR_KV", v);
+        }
         None => {}
     }
     cmd.exec()
@@ -1301,7 +1402,9 @@ fn encode_messages(
             "user" => {
                 if !tools_injected {
                     // no system message: tools ride their own system turn
-                    ids.extend(m.render_system(tok, tool_text.as_deref().unwrap_or("").trim_start()));
+                    ids.extend(
+                        m.render_system(tok, tool_text.as_deref().unwrap_or("").trim_start()),
+                    );
                     tools_injected = true;
                 }
                 ids.extend(m.render_user(tok, &content));
@@ -1443,7 +1546,11 @@ fn prefix_common(
     if !cache_ok {
         return Ok(0);
     }
-    let mut common = hist.iter().zip(prompt.iter()).take_while(|(a, b)| a == b).count();
+    let mut common = hist
+        .iter()
+        .zip(prompt.iter())
+        .take_while(|(a, b)| a == b)
+        .count();
     let recurrent = model.recurrent_state();
     if recurrent && (common < hist.len() || common == prompt.len()) {
         let target = common.min(prompt.len() - 1) as u32;
@@ -1485,13 +1592,19 @@ fn handle_chat(
     let messages = req["messages"]
         .as_array()
         .ok_or("chat request needs a messages array")?;
-    let temp = req["temperature"].as_f64().map(|v| v as f32).unwrap_or(default_temp);
+    let temp = req["temperature"]
+        .as_f64()
+        .map(|v| v as f32)
+        .unwrap_or(default_temp);
     let top_p = req["top_p"].as_f64().map(|v| v as f32).unwrap_or(1.0);
     // Per-request fields override the server start flags (--min-p, --top-k,
     // --repeat-penalty); the flags give the WebUI a way to set them globally.
     let min_p = req["min_p"].as_f64().map(|v| v as f32).unwrap_or(srv_min_p);
     let top_k = req["top_k"].as_u64().map(|v| v as u32).unwrap_or(srv_top_k);
-    let repeat_penalty = req["repeat_penalty"].as_f64().map(|v| v as f32).unwrap_or(srv_repeat_penalty);
+    let repeat_penalty = req["repeat_penalty"]
+        .as_f64()
+        .map(|v| v as f32)
+        .unwrap_or(srv_repeat_penalty);
     let seed = req["seed"].as_u64().unwrap_or(42);
     let streaming = req["stream"].as_bool().unwrap_or(false);
 
@@ -1527,7 +1640,11 @@ fn handle_chat(
             tools_vec.extend(m.enabled_tools_as_openai());
         }
     }
-    let tools = if tools_vec.is_empty() { None } else { Some(tools_vec) };
+    let tools = if tools_vec.is_empty() {
+        None
+    } else {
+        Some(tools_vec)
+    };
     let prompt = encode_messages(tok, markers, messages, tools.as_ref());
     if std::env::var_os("PULSAR_DEBUG_IDS").is_some() {
         eprintln!("pulsar-serve: prompt ids {prompt:?}");
@@ -1572,7 +1689,11 @@ fn handle_chat(
         && std::env::var_os("PULSAR_NO_PREFIX_CACHE").is_none();
     let mut common = 0usize;
     if cache_ok {
-        common = hist.iter().zip(prompt.iter()).take_while(|(a, b)| a == b).count();
+        common = hist
+            .iter()
+            .zip(prompt.iter())
+            .take_while(|(a, b)| a == b)
+            .count();
         let recurrent = model.recurrent_state();
         if recurrent && (common < hist.len() || common == prompt.len()) {
             // recurrent state can only extend the exact stream: on a
@@ -1595,7 +1716,10 @@ fn handle_chat(
     if common == 0 {
         hist.clear(); // pos0 == 0 resets recurrent state in the engine
     } else {
-        eprintln!("pulsar-serve: {id}: prefix cache hit, {common}/{} tokens reused", prompt.len());
+        eprintln!(
+            "pulsar-serve: {id}: prefix cache hit, {common}/{} tokens reused",
+            prompt.len()
+        );
     }
     let stop_seen = std::cell::Cell::new(None::<u32>);
     let tool_phase = std::cell::Cell::new(false);
@@ -1656,7 +1780,11 @@ fn handle_chat(
                             return;
                         }
                     }
-                    if ks.write_all(b": prefill keepalive\n\n").and_then(|_| ks.flush()).is_err() {
+                    if ks
+                        .write_all(b": prefill keepalive\n\n")
+                        .and_then(|_| ks.flush())
+                        .is_err()
+                    {
                         dead.store(true, Ordering::Relaxed);
                         return;
                     }
@@ -1727,7 +1855,9 @@ fn handle_chat(
                             _ if reasoning => rbytes.extend_from_slice(&d),
                             _ => bytes.extend_from_slice(&d),
                         }
-                    } else if open_think && (markers.closes_thinking_token(t) || d.as_slice() == b"</think>") {
+                    } else if open_think
+                        && (markers.closes_thinking_token(t) || d.as_slice() == b"</think>")
+                    {
                         reasoning = false; // close: the reply starts here
                     } else if open_think && reasoning {
                         rbytes.extend_from_slice(&d);
@@ -1746,7 +1876,10 @@ fn handle_chat(
                         "id": id, "object": "chat.completion.chunk", "model": model_name,
                         "choices": [{"index": 0, "delta": {"reasoning_content": text}, "finish_reason": null}],
                     });
-                    if write!(stream, "data: {chunk}\n\n").and_then(|_| stream.flush()).is_err() {
+                    if write!(stream, "data: {chunk}\n\n")
+                        .and_then(|_| stream.flush())
+                        .is_err()
+                    {
                         send_err.set(true);
                     }
                 }
@@ -1777,14 +1910,15 @@ fn handle_chat(
                         "id": id, "object": "chat.completion.chunk", "model": model_name,
                         "choices": [{"index": 0, "delta": {"content": text}, "finish_reason": null}],
                     });
-                    if write!(stream, "data: {chunk}\n\n").and_then(|_| stream.flush()).is_err() {
+                    if write!(stream, "data: {chunk}\n\n")
+                        .and_then(|_| stream.flush())
+                        .is_err()
+                    {
                         send_err.set(true);
                     }
                 }
             },
-            || {
-                ka_dead.load(std::sync::atomic::Ordering::Relaxed) || send_err.get()
-            },
+            || ka_dead.load(std::sync::atomic::Ordering::Relaxed) || send_err.get(),
         )?;
         ka_stop.store(true, std::sync::atomic::Ordering::Relaxed);
         let _ = ka_thread.join();
@@ -1811,7 +1945,11 @@ fn handle_chat(
             });
             let _ = write!(stream, "data: {tc}\n\n");
         }
-        let fin_reason = if calls.is_empty() { "stop" } else { "tool_calls" };
+        let fin_reason = if calls.is_empty() {
+            "stop"
+        } else {
+            "tool_calls"
+        };
         let fin = serde_json::json!({
             "id": id, "object": "chat.completion.chunk", "model": model_name,
             "choices": [{"index": 0, "delta": {}, "finish_reason": fin_reason}],
@@ -1834,11 +1972,26 @@ fn handle_chat(
         );
         if verbose {
             let elapsed = t0.elapsed().as_secs_f64().max(1e-9);
-            let prefill_s = t_first.get().map(|t| t.elapsed().as_secs_f64()).unwrap_or(0.0);
-            let pp = if prefill_n > 0 { prefill_n as f64 / prefill_s.max(1e-9) } else { 0.0 };
+            let prefill_s = t_first
+                .get()
+                .map(|t| t.elapsed().as_secs_f64())
+                .unwrap_or(0.0);
+            let pp = if prefill_n > 0 {
+                prefill_n as f64 / prefill_s.max(1e-9)
+            } else {
+                0.0
+            };
             let slab_miss = st.dev_cache.misses.saturating_sub(miss0);
-            let dt = if t_first.get().is_some() { elapsed - prefill_s } else { 0.0 };
-            let dec = if n_out > 0 && dt > 0.0 { n_out as f64 / dt } else { 0.0 };
+            let dt = if t_first.get().is_some() {
+                elapsed - prefill_s
+            } else {
+                0.0
+            };
+            let dec = if n_out > 0 && dt > 0.0 {
+                n_out as f64 / dt
+            } else {
+                0.0
+            };
             eprintln!(
                 "pulsar-serve: {id}: prefill {prefill_n} tok in {prefill_s:.2}s ({pp:.0} tok/s), \
                  decode {n_out} tok in {dt:.2}s ({dec:.1} tok/s), {slab_miss} slabs from disk"
@@ -1930,7 +2083,8 @@ fn handle_chat(
             // <tool_result> above. Break with the last text as the answer;
             // upgrade path: a tool-result-aware duplicate check (same name
             // + args, ignoring prior failed results) instead of exact match.
-            if turn > 0 && calls.len() == prev_calls.len()
+            if turn > 0
+                && calls.len() == prev_calls.len()
                 && calls.iter().zip(prev_calls.iter()).all(|(a, b)| a == b)
             {
                 eprintln!(
@@ -1946,11 +2100,13 @@ fn handle_chat(
             let tool_calls_json: Vec<serde_json::Value> = calls
                 .iter()
                 .enumerate()
-                .map(|(ci, (name, args))| serde_json::json!({
-                    "id": format!("call_{request_id}_{turn}_{ci}"),
-                    "type": "function",
-                    "function": {"name": name, "arguments": args},
-                }))
+                .map(|(ci, (name, args))| {
+                    serde_json::json!({
+                        "id": format!("call_{request_id}_{turn}_{ci}"),
+                        "type": "function",
+                        "function": {"name": name, "arguments": args},
+                    })
+                })
                 .collect();
             msgs.push(serde_json::json!({
                 "role": "assistant",
@@ -2011,11 +2167,26 @@ fn handle_chat(
         );
         if verbose {
             let elapsed = t0.elapsed().as_secs_f64().max(1e-9);
-            let prefill_s = t_first.get().map(|t| t.elapsed().as_secs_f64()).unwrap_or(0.0);
-            let pp = if prefill_n > 0 { prefill_n as f64 / prefill_s.max(1e-9) } else { 0.0 };
+            let prefill_s = t_first
+                .get()
+                .map(|t| t.elapsed().as_secs_f64())
+                .unwrap_or(0.0);
+            let pp = if prefill_n > 0 {
+                prefill_n as f64 / prefill_s.max(1e-9)
+            } else {
+                0.0
+            };
             let slab_miss = st.dev_cache.misses.saturating_sub(miss0);
-            let dt = if t_first.get().is_some() { elapsed - prefill_s } else { 0.0 };
-            let dec = if n_out_total > 0 && dt > 0.0 { n_out_total as f64 / dt } else { 0.0 };
+            let dt = if t_first.get().is_some() {
+                elapsed - prefill_s
+            } else {
+                0.0
+            };
+            let dec = if n_out_total > 0 && dt > 0.0 {
+                n_out_total as f64 / dt
+            } else {
+                0.0
+            };
             eprintln!(
                 "pulsar-serve: {id}: prefill {prefill_n} tok in {prefill_s:.2}s ({pp:.0} tok/s), \
                  decode {n_out_total} tok in {dt:.2}s ({dec:.1} tok/s), {slab_miss} slabs from disk"

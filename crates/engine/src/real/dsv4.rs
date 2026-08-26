@@ -17,9 +17,9 @@ const NEG_INF: f32 = -1.0e30; // DS4_NEG_INF (finite on purpose)
 /// Batched prefill chunk width (matches the qwen35 blueprint; the
 /// per-token interleave keeps the SWA ring correct within a chunk).
 const T_MAX: usize = 128; // SWA ring cap: larger chunks are impossible
-                           // (ring slots would clobber), smaller chunks
-                           // starve the grouped MoE tiles (measured: 16er
-                           // chunks => 62% of prefill time in moe-kernels)
+                          // (ring slots would clobber), smaller chunks
+                          // starve the grouped MoE tiles (measured: 16er
+                          // chunks => 62% of prefill time in moe-kernels)
 const ROUTER_FLOOR: f32 = 6.103515625e-5;
 
 /* ---- host float helpers (reference math) ------------------------------- */
@@ -248,21 +248,43 @@ fn rope_ramp(low: f32, high: f32, i0: u32) -> f32 {
     1.0 - y.clamp(0.0, 1.0)
 }
 
-fn rope_corr_dims(n_dims: u32, n_ctx_orig: u32, base: f32, beta_fast: f32, beta_slow: f32) -> (f32, f32) {
+fn rope_corr_dims(
+    n_dims: u32,
+    n_ctx_orig: u32,
+    base: f32,
+    beta_fast: f32,
+    beta_slow: f32,
+) -> (f32, f32) {
     let dim = |beta: f32| {
         n_dims as f32 * (n_ctx_orig as f32 / (beta * 2.0 * std::f32::consts::PI)).ln()
             / (2.0 * base.ln())
     };
-    (dim(beta_fast).floor().max(0.0), dim(beta_slow).ceil().min(n_dims as f32 - 1.0))
+    (
+        dim(beta_fast).floor().max(0.0),
+        dim(beta_slow).ceil().min(n_dims as f32 - 1.0),
+    )
 }
 
 /// Rotate the last n_rot dims of each head (compressed-layer YaRN when
 /// r.ext_factor != 0). Matches the device rope tail.
-fn rope_tail_host(x: &mut [f32], n_head: usize, head_dim: usize, n_rot: usize, pos: u32, r: &kernels::RopeCfg) {
+fn rope_tail_host(
+    x: &mut [f32],
+    n_head: usize,
+    head_dim: usize,
+    n_rot: usize,
+    pos: u32,
+    r: &kernels::RopeCfg,
+) {
     let n_nope = head_dim - n_rot;
     let theta_scale = r.freq_base.powf(-2.0 / n_rot as f32);
     let (c0, c1) = if r.ext_factor != 0.0 {
-        rope_corr_dims(n_rot as u32, r.n_ctx_orig, r.freq_base, r.beta_fast, r.beta_slow)
+        rope_corr_dims(
+            n_rot as u32,
+            r.n_ctx_orig,
+            r.freq_base,
+            r.beta_fast,
+            r.beta_slow,
+        )
     } else {
         (0.0, 0.0)
     };
@@ -328,7 +350,14 @@ pub(super) fn rope_cfg(s: &Shape, ratio: u32) -> kernels::RopeCfg {
 /// layout: the reference's post step reads its row-softmax matrix
 /// TRANSPOSED (comb[dst + src*n_hc]), so the transpose happens here.
 #[allow(dead_code)] // host reference, exercised by the unit tests
-fn sinkhorn_split(mix: &[f32], scale: &[f32], base: &[f32], n_hc: usize, iters: u32, eps: f32) -> (Vec<f32>, Vec<f32>, Vec<f32>) {
+fn sinkhorn_split(
+    mix: &[f32],
+    scale: &[f32],
+    base: &[f32],
+    n_hc: usize,
+    iters: u32,
+    eps: f32,
+) -> (Vec<f32>, Vec<f32>, Vec<f32>) {
     let mut pre = vec![0f32; n_hc];
     let mut post = vec![0f32; n_hc];
     for i in 0..n_hc {
@@ -413,7 +442,14 @@ fn topk_desc(score: &[f32], k: usize) -> Vec<i32> {
 /// probs = sqrt(softplus(logits)); selection = biased top-k (or the
 /// tid2eid row on hash layers); weights = unbiased probs of the winners,
 /// sum-normalized (floored) and scaled.
-fn route(logits: &[f32], bias: &[f32], tid2eid: Option<&Vec<i32>>, token: u32, k: usize, weight_scale: f32) -> Result<(Vec<i32>, Vec<f32>)> {
+fn route(
+    logits: &[f32],
+    bias: &[f32],
+    tid2eid: Option<&Vec<i32>>,
+    token: u32,
+    k: usize,
+    weight_scale: f32,
+) -> Result<(Vec<i32>, Vec<f32>)> {
     let n = logits.len();
     let probs: Vec<f32> = logits.iter().map(|&l| softplus_stable(l).sqrt()).collect();
     let selected = match tid2eid {
@@ -515,7 +551,17 @@ impl CompLane {
 
     /// Feed one token's kv/score projections; on a ratio boundary emit
     /// the pooled + normed + roped + quant-sim'd + f16-rounded row.
-    fn step(&mut self, kv_cur: &[f32], sc_cur: &[f32], ape: &[f32], norm: &[f32], pos: u32, rms_eps: f32, rope: &kernels::RopeCfg, n_rot: usize) -> Option<Vec<f32>> {
+    fn step(
+        &mut self,
+        kv_cur: &[f32],
+        sc_cur: &[f32],
+        ape: &[f32],
+        norm: &[f32],
+        pos: u32,
+        rms_eps: f32,
+        rope: &kernels::RopeCfg,
+        n_rot: usize,
+    ) -> Option<Vec<f32>> {
         let (w, hd, r) = (self.width, self.head_dim, self.ratio);
         let pos_mod = pos as usize % r;
         let row = if r == 4 { r + pos_mod } else { pos_mod };
@@ -529,8 +575,11 @@ impl CompLane {
         let pooled = self.pool();
         let ss: f64 = pooled.iter().map(|&v| (v as f64) * (v as f64)).sum();
         let rms = 1.0 / ((ss as f32 / hd as f32) + rms_eps).sqrt();
-        let mut out: Vec<f32> =
-            pooled.iter().zip(norm).map(|(&v, &n)| v * rms * n).collect();
+        let mut out: Vec<f32> = pooled
+            .iter()
+            .zip(norm)
+            .map(|(&v, &n)| v * rms * n)
+            .collect();
         let comp_pos = pos + 1 - r as u32;
         rope_tail_host(&mut out, 1, hd, n_rot, comp_pos, rope);
         if hd == 512 {
@@ -639,7 +688,7 @@ pub(super) struct Dsv4Rt {
     comp_sc: DeviceBuf,
     idx_kv: DeviceBuf, // [T][idx width] indexer-lane projections
     idx_sc: DeviceBuf,
-    idx_w: DeviceBuf,  // [T][n_idx_head] indexer proj
+    idx_w: DeviceBuf,   // [T][n_idx_head] indexer proj
     allowed: DeviceBuf, // [comp cap] u8 visibility mask
     /// GPU indexer-scoring scratch: prepped query [n_idx_head*n_idx_dim]
     /// and scores [idx cap] f32 (PULSAR_NO_GPU_IDX restores the host path).
@@ -673,9 +722,17 @@ impl Dsv4Rt {
         for il in 0..s.n_exec_layer as usize {
             let ratio = m.compress_ratios[il];
             layers.push(LayerRt {
-                comp: if ratio != 0 { Some(DevLane::new(ratio, s.head_dim)?) } else { None },
+                comp: if ratio != 0 {
+                    Some(DevLane::new(ratio, s.head_dim)?)
+                } else {
+                    None
+                },
                 n_comp: 0,
-                idx: if ratio == 4 { Some(DevLane::new(ratio, s.n_idx_dim)?) } else { None },
+                idx: if ratio == 4 {
+                    Some(DevLane::new(ratio, s.n_idx_dim)?)
+                } else {
+                    None
+                },
                 idx_cache: DeviceBuf::alloc(if ratio == 4 {
                     max_ratio_cap * s.n_idx_dim as usize * 4
                 } else {
@@ -692,7 +749,9 @@ impl Dsv4Rt {
             hc_cur: DeviceBuf::alloc(T_MAX * (s.n_hc * s.n_embd) as usize * 4)?,
             hc_next: DeviceBuf::alloc(T_MAX * (s.n_hc * s.n_embd) as usize * 4)?,
             mix: DeviceBuf::alloc(T_MAX * 6 * s.n_hc as usize * 4)?,
-            low: DeviceBuf::alloc(T_MAX * (s.n_out_group * rank).max(s.n_idx_head * s.n_idx_dim) as usize * 4)?,
+            low: DeviceBuf::alloc(
+                T_MAX * (s.n_out_group * rank).max(s.n_idx_head * s.n_idx_dim) as usize * 4,
+            )?,
             comp_kv: DeviceBuf::alloc(T_MAX * 2 * s.head_dim as usize * 4)?,
             comp_sc: DeviceBuf::alloc(T_MAX * 2 * s.head_dim as usize * 4)?,
             idx_kv: DeviceBuf::alloc(T_MAX * 2 * s.n_idx_dim.max(1) as usize * 4)?,
@@ -708,7 +767,9 @@ impl Dsv4Rt {
             // 1 byte per 128-row comp chunk per token (max_ratio_cap/128)
             idx_q_prep: DeviceBuf::alloc(T_MAX * (s.n_idx_head * s.n_idx_dim).max(1) as usize * 4)?,
             idx_scores: DeviceBuf::alloc(T_MAX * max_ratio_cap * 4)?,
-            idx_ring_snap: DeviceBuf::alloc(T_MAX * (s.n_swa.max(1) as usize * s.head_dim as usize * 4))?,
+            idx_ring_snap: DeviceBuf::alloc(
+                T_MAX * (s.n_swa.max(1) as usize * s.head_dim as usize * 4),
+            )?,
             coef_attn: DeviceBuf::alloc(T_MAX * 6 * s.n_hc as usize * 4)?,
             coef_ffn: DeviceBuf::alloc(T_MAX * 6 * s.n_hc as usize * 4)?,
             layers,
@@ -790,7 +851,18 @@ pub(super) struct Dsv4LayerCkpt {
 
 /// Score compressed rows with the QAT'd indexer query and pick top-k.
 /// Returns None when every row is visible (n_comp <= top_k).
-fn indexer_allowed(q: &mut [f32], weights: &[f32], idx_cache: &[f32], n_comp: usize, n_head: usize, head_dim: usize, top_k: usize, pos: u32, rope: &kernels::RopeCfg, n_rot: usize) -> Option<Vec<u8>> {
+fn indexer_allowed(
+    q: &mut [f32],
+    weights: &[f32],
+    idx_cache: &[f32],
+    n_comp: usize,
+    n_head: usize,
+    head_dim: usize,
+    top_k: usize,
+    pos: u32,
+    rope: &kernels::RopeCfg,
+    n_rot: usize,
+) -> Option<Vec<u8>> {
     if n_comp <= top_k {
         return None;
     }
@@ -834,22 +906,38 @@ fn indexer_allowed(q: &mut [f32], weights: &[f32], idx_cache: &[f32], n_comp: us
             for r in 0..n_comp {
                 let mut h = 0u64;
                 for &v in &idx_cache[r * nd..(r + 1) * nd] {
-                    h = h.wrapping_mul(1099511628211).wrapping_add(v.to_bits() as u64);
+                    h = h
+                        .wrapping_mul(1099511628211)
+                        .wrapping_add(v.to_bits() as u64);
                 }
                 eprintln!("hrow pos={pos} r={r} h={h:x}");
             }
         }
         // input fingerprint: hashes of q and weights
-        let qh: u64 = q.iter().fold(0u64, |h, x| h.wrapping_mul(1099511628211).wrapping_add(x.to_bits() as u64));
-        let wh: u64 = weights.iter().fold(0u64, |h, x| h.wrapping_mul(1099511628211).wrapping_add(x.to_bits() as u64));
+        let qh: u64 = q.iter().fold(0u64, |h, x| {
+            h.wrapping_mul(1099511628211)
+                .wrapping_add(x.to_bits() as u64)
+        });
+        let wh: u64 = weights.iter().fold(0u64, |h, x| {
+            h.wrapping_mul(1099511628211)
+                .wrapping_add(x.to_bits() as u64)
+        });
         // score fingerprint: max, argmax, min, nan-count
         let (mut mx, mut mn) = (f32::NEG_INFINITY, f32::INFINITY);
         let (mut ax, mut an) = (0usize, 0usize);
         let mut nans = 0;
         for (c, &s) in scores.iter().enumerate() {
-            if s.is_nan() { nans += 1; }
-            if s > mx { mx = s; ax = c; }
-            if s < mn { mn = s; an = c; }
+            if s.is_nan() {
+                nans += 1;
+            }
+            if s > mx {
+                mx = s;
+                ax = c;
+            }
+            if s < mn {
+                mn = s;
+                an = c;
+            }
         }
         eprintln!(
             "hostprobe pos={pos} n_comp={n_comp} qh={qh:x} wh={wh:x} max={mx:e}@row{ax} min={mn:e}@row{an} nans={nans} first={:e} last={:e}",
@@ -861,20 +949,27 @@ fn indexer_allowed(q: &mut [f32], weights: &[f32], idx_cache: &[f32], n_comp: us
 
 /* ---- forward ------------------------------------------------------------ */
 
-
-    /// task #39 probe: fnv hash of `n` f32 rows in `buf` (PULSAR_L0_LOG).
-    fn l0_hash(buf: &kernels::DeviceBuf, n: usize) -> u64 {
-        let v = buf.read_f32(n).unwrap_or_default();
-        let mut h = 0u64;
-        for x in v {
-            h = h.wrapping_mul(1099511628211).wrapping_add(x.to_bits() as u64);
-        }
-        h
+/// task #39 probe: fnv hash of `n` f32 rows in `buf` (PULSAR_L0_LOG).
+fn l0_hash(buf: &kernels::DeviceBuf, n: usize) -> u64 {
+    let v = buf.read_f32(n).unwrap_or_default();
+    let mut h = 0u64;
+    for x in v {
+        h = h
+            .wrapping_mul(1099511628211)
+            .wrapping_add(x.to_bits() as u64);
     }
+    h
+}
 
 impl Model {
     /// V4 forward: sequential single-token steps (rows = 0 or 1).
-    pub(super) fn forward_dsv4(&self, st: &mut State, tokens: &[u32], pos0: u32, rows: u32) -> Result<Option<Vec<f32>>> {
+    pub(super) fn forward_dsv4(
+        &self,
+        st: &mut State,
+        tokens: &[u32],
+        pos0: u32,
+        rows: u32,
+    ) -> Result<Option<Vec<f32>>> {
         if tokens.is_empty() {
             return Err("empty batch".into());
         }
@@ -890,7 +985,14 @@ impl Model {
         r
     }
 
-    fn forward_dsv4_inner(&self, st: &mut State, rt: &mut Dsv4Rt, tokens: &[u32], pos0: u32, rows: u32) -> Result<Option<Vec<f32>>> {
+    fn forward_dsv4_inner(
+        &self,
+        st: &mut State,
+        rt: &mut Dsv4Rt,
+        tokens: &[u32],
+        pos0: u32,
+        rows: u32,
+    ) -> Result<Option<Vec<f32>>> {
         let s = self.shape;
         let row = s.n_embd as usize * 4;
         if pos0 == 0 {
@@ -921,7 +1023,14 @@ impl Model {
                 let t = sub.len();
                 let ids: Vec<i32> = sub.iter().map(|&x| x as i32).collect();
                 st.tok.write(0, kernels::as_bytes(&ids))?;
-                kernels::embed_q8_0(&mut st.cur, &self.token_embd, &st.tok, s.n_embd, s.n_vocab, t as u32)?;
+                kernels::embed_q8_0(
+                    &mut st.cur,
+                    &self.token_embd,
+                    &st.tok,
+                    s.n_embd,
+                    s.n_vocab,
+                    t as u32,
+                )?;
                 // hc_from_plain_embedding, token-major streams
                 for (i, _) in sub.iter().enumerate() {
                     for h in 0..s.n_hc as usize {
@@ -943,8 +1052,12 @@ impl Model {
         }
         if std::env::var_os("PULSAR_PROFILE").is_some() {
             let s = |d: std::time::Duration| d.as_secs_f64();
-            let total = s(rt.prof.attn_kernels) + s(rt.prof.attn_token) + s(rt.prof.ffn_pre)
-                + s(rt.prof.route) + s(rt.prof.moe_kernels) + s(rt.prof.sync);
+            let total = s(rt.prof.attn_kernels)
+                + s(rt.prof.attn_token)
+                + s(rt.prof.ffn_pre)
+                + s(rt.prof.route)
+                + s(rt.prof.moe_kernels)
+                + s(rt.prof.sync);
             eprintln!(
                 "pulsar: dsv4 prefill profile: attn-kernels {:.3}s, attn-token-loop {:.3}s (raw {:.3}s + comp {:.3}s + idx {:.3}s (comp {:.3}s + d2h {:.3}s + host {:.3}s) + att {:.3}s), ffn-pre {:.3}s, route {:.3}s (read {:.3}s + host {:.3}s), moe-kernels {:.3}s, sync {:.3}s (sum {:.3}s)",
                 s(rt.prof.attn_kernels), s(rt.prof.attn_token),
@@ -964,18 +1077,54 @@ impl Model {
         let out = self.dsv4_out.as_ref().ok_or("dsv4 output head missing")?;
         let ones = self.ones_hc.as_ref().ok_or("ones_hc missing")?;
         let hc_row = (s.n_hc * s.n_embd) as usize * 4;
-        kernels::copy_d2d(&mut rt.hc_next, 0, &rt.hc_cur, (last_t - 1) * hc_row, hc_row)?;
+        kernels::copy_d2d(
+            &mut rt.hc_next,
+            0,
+            &rt.hc_cur,
+            (last_t - 1) * hc_row,
+            hc_row,
+        )?;
         std::mem::swap(&mut rt.hc_cur, &mut rt.hc_next);
-        kernels::rms_norm(&mut rt.hc_next, &rt.hc_cur, ones, s.n_hc * s.n_embd, 1, s.rms_eps)?;
-        kernels::matmul_f32(&mut rt.mix, &out.fn_w, &rt.hc_next, s.n_hc * s.n_embd, s.n_hc, 1)?;
+        kernels::rms_norm(
+            &mut rt.hc_next,
+            &rt.hc_cur,
+            ones,
+            s.n_hc * s.n_embd,
+            1,
+            s.rms_eps,
+        )?;
+        kernels::matmul_f32(
+            &mut rt.mix,
+            &out.fn_w,
+            &rt.hc_next,
+            s.n_hc * s.n_embd,
+            s.n_hc,
+            1,
+        )?;
         let pre = rt.mix.read_f32(s.n_hc as usize)?;
         let w: Vec<f32> = pre
             .iter()
             .zip(&out.base)
             .map(|(&p, &b)| sigmoid(p * out.scale + b) + s.hc_eps)
             .collect();
-        kernels::dsv4_hc_mix(&mut st.last_row, &rt.hc_cur, None, &w, None, s.n_embd, s.n_hc, 1)?;
-        kernels::rms_norm(&mut st.normed, &st.last_row, &self.output_norm, s.n_embd, 1, s.rms_eps)?;
+        kernels::dsv4_hc_mix(
+            &mut st.last_row,
+            &rt.hc_cur,
+            None,
+            &w,
+            None,
+            s.n_embd,
+            s.n_hc,
+            1,
+        )?;
+        kernels::rms_norm(
+            &mut st.normed,
+            &st.last_row,
+            &self.output_norm,
+            s.n_embd,
+            1,
+            s.rms_eps,
+        )?;
         self.head_logits(st, 1)?;
         kernels::sync()?;
         Ok(Some(st.logits.read_f32(s.n_vocab as usize)?))
@@ -985,16 +1134,63 @@ impl Model {
     /// the Sinkhorn split ON DEVICE into a coef buffer (was 2 host
     /// readbacks per layer per token), reduce the streams into st.cur.
     /// `ffn` picks which coef buffer holds this half's gates.
-    fn dsv4_hc_pre(&self, st: &mut State, rt: &mut Dsv4Rt, fn_w: &DeviceBuf, scale: &DeviceBuf, base: &DeviceBuf, ffn: bool, t: u32) -> Result {
+    fn dsv4_hc_pre(
+        &self,
+        st: &mut State,
+        rt: &mut Dsv4Rt,
+        fn_w: &DeviceBuf,
+        scale: &DeviceBuf,
+        base: &DeviceBuf,
+        ffn: bool,
+        t: u32,
+    ) -> Result {
         let s = self.shape;
         let ones = self.ones_hc.as_ref().ok_or("ones_hc missing")?;
         // token-major streams: the flat norm is per token over 4*n_embd
-        kernels::rms_norm(&mut rt.hc_next, &rt.hc_cur, ones, s.n_hc * s.n_embd, t, s.rms_eps)?;
-        kernels::matmul_f32(&mut rt.mix, fn_w, &rt.hc_next, s.n_hc * s.n_embd, 6 * s.n_hc, t)?;
-        let coef = if ffn { &mut rt.coef_ffn } else { &mut rt.coef_attn };
-        kernels::dsv4_sinkhorn(coef, &rt.mix, scale, base, s.n_hc, s.hc_sinkhorn, s.hc_eps, t)?;
+        kernels::rms_norm(
+            &mut rt.hc_next,
+            &rt.hc_cur,
+            ones,
+            s.n_hc * s.n_embd,
+            t,
+            s.rms_eps,
+        )?;
+        kernels::matmul_f32(
+            &mut rt.mix,
+            fn_w,
+            &rt.hc_next,
+            s.n_hc * s.n_embd,
+            6 * s.n_hc,
+            t,
+        )?;
+        let coef = if ffn {
+            &mut rt.coef_ffn
+        } else {
+            &mut rt.coef_attn
+        };
+        kernels::dsv4_sinkhorn(
+            coef,
+            &rt.mix,
+            scale,
+            base,
+            s.n_hc,
+            s.hc_sinkhorn,
+            s.hc_eps,
+            t,
+        )?;
         let coef = if ffn { &rt.coef_ffn } else { &rt.coef_attn };
-        kernels::dsv4_hc_mix_dev(&mut st.cur, &rt.hc_cur, None, coef, 0, -1, s.n_embd, s.n_hc, 1, t)?;
+        kernels::dsv4_hc_mix_dev(
+            &mut st.cur,
+            &rt.hc_cur,
+            None,
+            coef,
+            0,
+            -1,
+            s.n_embd,
+            s.n_hc,
+            1,
+            t,
+        )?;
         Ok(())
     }
 
@@ -1003,12 +1199,32 @@ impl Model {
     fn dsv4_hc_post(&self, rt: &mut Dsv4Rt, block_out: &DeviceBuf, ffn: bool, t: u32) -> Result {
         let s = self.shape;
         let coef = if ffn { &rt.coef_ffn } else { &rt.coef_attn };
-        kernels::dsv4_hc_mix_dev(&mut rt.hc_next, &rt.hc_cur, Some(block_out), coef, 2 * s.n_hc, s.n_hc as i32, s.n_embd, s.n_hc, s.n_hc, t)?;
+        kernels::dsv4_hc_mix_dev(
+            &mut rt.hc_next,
+            &rt.hc_cur,
+            Some(block_out),
+            coef,
+            2 * s.n_hc,
+            s.n_hc as i32,
+            s.n_embd,
+            s.n_hc,
+            s.n_hc,
+            t,
+        )?;
         std::mem::swap(&mut rt.hc_cur, &mut rt.hc_next);
         Ok(())
     }
 
-    fn eval_dsv4_layer(&self, st: &mut State, rt: &mut Dsv4Rt, il: usize, l: &LayerW, tokens: &[u32], pos0: u32, t: u32) -> Result {
+    fn eval_dsv4_layer(
+        &self,
+        st: &mut State,
+        rt: &mut Dsv4Rt,
+        il: usize,
+        l: &LayerW,
+        tokens: &[u32],
+        pos0: u32,
+        t: u32,
+    ) -> Result {
         let s = self.shape;
         let eps = s.rms_eps;
         let Attn::Dsv4(w) = &l.attn else {
@@ -1020,23 +1236,41 @@ impl Model {
 
         // ---- attention half (matmuls/norms/rope batched)
         let t_attn = std::time::Instant::now();
-        self.dsv4_hc_pre(st, rt, &w.hc_attn_fn, &w.hc_attn_scale, &w.hc_attn_base, false, t)?;
+        self.dsv4_hc_pre(
+            st,
+            rt,
+            &w.hc_attn_fn,
+            &w.hc_attn_scale,
+            &w.hc_attn_base,
+            false,
+            t,
+        )?;
         kernels::rms_norm(&mut st.normed, &st.cur, &l.attn_norm, s.n_embd, t, eps)?;
         kernels::matmul_q8_0(&mut st.q_rank, &w.q_a, &st.normed, s.n_embd, s.n_lora_q, t)?;
-        kernels::rms_norm(&mut st.q_rank_norm, &st.q_rank, &w.q_a_norm, s.n_lora_q, t, eps)?;
+        kernels::rms_norm(
+            &mut st.q_rank_norm,
+            &st.q_rank,
+            &w.q_a_norm,
+            s.n_lora_q,
+            t,
+            eps,
+        )?;
         if std::env::var_os("PULSAR_HID_LOG").is_some() && (2030..2066).contains(&(pos0 + t - 1)) {
             kernels::sync()?;
             let rows = st.normed.read_f32(t as usize * s.n_embd as usize)?;
             for i in 0..t as usize {
                 let mut h = 0u64;
                 for &v in &rows[i * s.n_embd as usize..(i + 1) * s.n_embd as usize] {
-                    h = h.wrapping_mul(1099511628211).wrapping_add(v.to_bits() as u64);
+                    h = h
+                        .wrapping_mul(1099511628211)
+                        .wrapping_add(v.to_bits() as u64);
                 }
                 eprintln!("hid L{il} @{} h={h:x}", pos0 + i as u32);
             }
         }
         kernels::matmul_q8_0(&mut st.q, &w.q_b, &st.q_rank_norm, s.n_lora_q, q_dim, t)?;
-        let qprobe = std::env::var_os("PULSAR_L0_LOG").is_some() && il == 0 && (2046..2051).contains(&pos0);
+        let qprobe =
+            std::env::var_os("PULSAR_L0_LOG").is_some() && il == 0 && (2046..2051).contains(&pos0);
         if qprobe {
             kernels::sync()?;
             eprintln!(
@@ -1051,22 +1285,44 @@ impl Model {
         kernels::gqa_head_rms_norm(&mut st.q, None, t * s.n_head, s.head_dim, eps)?;
         if qprobe {
             kernels::sync()?;
-            eprintln!("qstage L{il} @{pos0} post_rms={:x}", l0_hash(&st.q, q_dim as usize));
+            eprintln!(
+                "qstage L{il} @{pos0} post_rms={:x}",
+                l0_hash(&st.q, q_dim as usize)
+            );
         }
         kernels::matmul_q8_0(&mut st.k, &w.kv, &st.normed, s.n_embd, s.head_dim, t)?;
         kernels::rms_norm(&mut st.v, &st.k, &w.kv_a_norm, s.head_dim, t, eps)?;
-        kernels::dsv4_rope_tail(&mut st.q, t, s.n_head, s.head_dim, s.rot_dim, pos0, &rope, false)?;
+        kernels::dsv4_rope_tail(
+            &mut st.q, t, s.n_head, s.head_dim, s.rot_dim, pos0, &rope, false,
+        )?;
         if qprobe {
             kernels::sync()?;
-            eprintln!("qstage L{il} @{pos0} post_rope={:x}", l0_hash(&st.q, q_dim as usize));
+            eprintln!(
+                "qstage L{il} @{pos0} post_rope={:x}",
+                l0_hash(&st.q, q_dim as usize)
+            );
         }
         kernels::dsv4_rope_tail(&mut st.v, t, 1, s.head_dim, s.rot_dim, pos0, &rope, false)?;
         kernels::dsv4_fp8_sim(&mut st.v, t, s.head_dim, s.rot_dim)?;
         kernels::dsv4_f16_round(&mut st.v, t * s.head_dim)?;
         // compressor projections batched (per-token rows consumed below)
         if let Some(comp) = &w.comp {
-            kernels::matmul_q8_0(&mut rt.comp_kv, &comp.kv_w, &st.normed, s.n_embd, comp.width, t)?;
-            kernels::matmul_q8_0(&mut rt.comp_sc, &comp.gate_w, &st.normed, s.n_embd, comp.width, t)?;
+            kernels::matmul_q8_0(
+                &mut rt.comp_kv,
+                &comp.kv_w,
+                &st.normed,
+                s.n_embd,
+                comp.width,
+                t,
+            )?;
+            kernels::matmul_q8_0(
+                &mut rt.comp_sc,
+                &comp.gate_w,
+                &st.normed,
+                s.n_embd,
+                comp.width,
+                t,
+            )?;
         }
 
         // indexer lane: projections batched; queries/weights read back
@@ -1098,12 +1354,42 @@ impl Model {
                 + (t as usize + w.ratio as usize - 1) / w.ratio as usize
                 > s.n_idx_topk as usize;
         if let Some(idx) = &w.idx {
-            kernels::matmul_q8_0(&mut rt.idx_kv, &idx.comp.kv_w, &st.normed, s.n_embd, idx.comp.width, t)?;
-            kernels::matmul_q8_0(&mut rt.idx_sc, &idx.comp.gate_w, &st.normed, s.n_embd, idx.comp.width, t)?;
+            kernels::matmul_q8_0(
+                &mut rt.idx_kv,
+                &idx.comp.kv_w,
+                &st.normed,
+                s.n_embd,
+                idx.comp.width,
+                t,
+            )?;
+            kernels::matmul_q8_0(
+                &mut rt.idx_sc,
+                &idx.comp.gate_w,
+                &st.normed,
+                s.n_embd,
+                idx.comp.width,
+                t,
+            )?;
             if idx_mask_can_fire {
-                kernels::matmul_q8_0(&mut rt.low, &idx.q_b, &st.q_rank_norm, s.n_lora_q, s.n_idx_head * s.n_idx_dim, t)?;
-                kernels::matmul_f32(&mut rt.idx_w, &idx.proj, &st.normed, s.n_embd, s.n_idx_head, t)?;
-                idx_q_host = rt.low.read_f32(t as usize * (s.n_idx_head * s.n_idx_dim) as usize)?;
+                kernels::matmul_q8_0(
+                    &mut rt.low,
+                    &idx.q_b,
+                    &st.q_rank_norm,
+                    s.n_lora_q,
+                    s.n_idx_head * s.n_idx_dim,
+                    t,
+                )?;
+                kernels::matmul_f32(
+                    &mut rt.idx_w,
+                    &idx.proj,
+                    &st.normed,
+                    s.n_embd,
+                    s.n_idx_head,
+                    t,
+                )?;
+                idx_q_host = rt
+                    .low
+                    .read_f32(t as usize * (s.n_idx_head * s.n_idx_dim) as usize)?;
                 idx_w_host = rt.idx_w.read_f32(t as usize * s.n_idx_head as usize)?;
             }
         }
@@ -1129,11 +1415,23 @@ impl Model {
             if let Some(comp) = &w.comp {
                 let lane = lrt.comp.as_mut().ok_or("compressor state missing")?;
                 kernels::dsv4_comp_step(
-                    &mut lane.st_kv, &mut lane.st_sc,
-                    &mut st.vcache[il], lrt.n_comp as usize * hd4,
-                    &rt.comp_kv, &rt.comp_sc, i * comp.width as usize * 4,
-                    &comp.ape, &comp.norm,
-                    comp.width, s.head_dim, lane.ratio, pos, emit, false, eps, &rope,
+                    &mut lane.st_kv,
+                    &mut lane.st_sc,
+                    &mut st.vcache[il],
+                    lrt.n_comp as usize * hd4,
+                    &rt.comp_kv,
+                    &rt.comp_sc,
+                    i * comp.width as usize * 4,
+                    &comp.ape,
+                    &comp.norm,
+                    comp.width,
+                    s.head_dim,
+                    lane.ratio,
+                    pos,
+                    emit,
+                    false,
+                    eps,
+                    &rope,
                 )?;
                 if emit {
                     lrt.n_comp += 1;
@@ -1146,11 +1444,23 @@ impl Model {
                 let lane = lrt.idx.as_mut().ok_or("indexer state missing")?;
                 let t_ic = std::time::Instant::now();
                 kernels::dsv4_comp_step(
-                    &mut lane.st_kv, &mut lane.st_sc,
-                    &mut lrt.idx_cache, lrt.n_idx_comp as usize * s.n_idx_dim as usize * 4,
-                    &rt.idx_kv, &rt.idx_sc, i * idx.comp.width as usize * 4,
-                    &idx.comp.ape, &idx.comp.norm,
-                    idx.comp.width, s.n_idx_dim, lane.ratio, pos, emit, true, eps, &rope,
+                    &mut lane.st_kv,
+                    &mut lane.st_sc,
+                    &mut lrt.idx_cache,
+                    lrt.n_idx_comp as usize * s.n_idx_dim as usize * 4,
+                    &rt.idx_kv,
+                    &rt.idx_sc,
+                    i * idx.comp.width as usize * 4,
+                    &idx.comp.ape,
+                    &idx.comp.norm,
+                    idx.comp.width,
+                    s.n_idx_dim,
+                    lane.ratio,
+                    pos,
+                    emit,
+                    true,
+                    eps,
+                    &rope,
                 )?;
                 rt.prof.idx_comp += t_ic.elapsed();
                 if emit {
@@ -1161,7 +1471,9 @@ impl Model {
                     if idx_mask_can_fire && std::env::var_os("PULSAR_NO_GPU_IDX").is_some() {
                         let nd = s.n_idx_dim as usize;
                         let t_d = std::time::Instant::now();
-                        let row = lrt.idx_cache.read_f32_at((lrt.n_idx_comp as usize - 1) * nd, nd)?;
+                        let row = lrt
+                            .idx_cache
+                            .read_f32_at((lrt.n_idx_comp as usize - 1) * nd, nd)?;
                         rt.prof.idx_d2h += t_d.elapsed();
                         lrt.idx_cache_host.extend_from_slice(&row);
                     }
@@ -1226,11 +1538,14 @@ impl Model {
                         // stale mirror from a real cascade divergence.
                         if std::env::var_os("PULSAR_IDX_PROBE").is_some() && pos == 2059 {
                             let nd = s.n_idx_dim as usize;
-                            let rows = lrt.idx_cache.read_f32_at(0, lrt.n_idx_comp as usize * nd)?;
+                            let rows =
+                                lrt.idx_cache.read_f32_at(0, lrt.n_idx_comp as usize * nd)?;
                             for (r, chunk) in rows.chunks_exact(nd).enumerate() {
                                 let mut h = 0u64;
                                 for &v in chunk {
-                                    h = h.wrapping_mul(1099511628211).wrapping_add(v.to_bits() as u64);
+                                    h = h
+                                        .wrapping_mul(1099511628211)
+                                        .wrapping_add(v.to_bits() as u64);
                                 }
                                 eprintln!("dhrow pos={pos} r={r} h={h:x}");
                             }
@@ -1250,7 +1565,12 @@ impl Model {
                         if let Some(mask) = mask {
                             rt.prof.idx_host += t_h.elapsed();
                             if std::env::var_os("PULSAR_MASK_LOG").is_some() {
-                                let h: u64 = mask.iter().enumerate().filter(|(_, &m)| m == 1).map(|(c, _)| c as u64 * 2654435761).fold(0u64, u64::wrapping_add);
+                                let h: u64 = mask
+                                    .iter()
+                                    .enumerate()
+                                    .filter(|(_, &m)| m == 1)
+                                    .map(|(c, _)| c as u64 * 2654435761)
+                                    .fold(0u64, u64::wrapping_add);
                                 eprintln!("mask L{il} @{pos} n={} h={h:x}", mask.len());
                             }
                             rt.allowed.write(0, &mask)?;
@@ -1262,12 +1582,21 @@ impl Model {
                 }
             }
             let n_comp = rt.layers[il].n_comp;
-            if std::env::var_os("PULSAR_L0_LOG").is_some() && il == 0 && i == 0 && (2046..2051).contains(&pos) {
+            if std::env::var_os("PULSAR_L0_LOG").is_some()
+                && il == 0
+                && i == 0
+                && (2046..2051).contains(&pos)
+            {
                 kernels::sync()?;
                 let hd = s.head_dim as usize;
                 let kc = st.kcache[il].read_f32_at((pos % s.n_swa) as usize * hd, hd)?;
                 let vc = st.vcache[il].read_f32_at((n_comp as usize - 1) * hd, hd)?;
-                let hh = |v: &[f32]| v.iter().fold(0u64, |h, x| h.wrapping_mul(1099511628211).wrapping_add(x.to_bits() as u64));
+                let hh = |v: &[f32]| {
+                    v.iter().fold(0u64, |h, x| {
+                        h.wrapping_mul(1099511628211)
+                            .wrapping_add(x.to_bits() as u64)
+                    })
+                };
                 eprintln!(
                     "attin L{il} @{pos} t={t} q={:x} v={:x} ring={:x} comp_last={:x} n_raw={n_raw} n_comp={n_comp}",
                     l0_hash(&st.q, q_dim as usize),
@@ -1367,9 +1696,17 @@ impl Model {
                     qat_row(&mut q[h * nd..(h + 1) * nd]);
                 }
                 rt.idx_q_prep.write(q_off, kernels::as_bytes(q))?;
-                if std::env::var_os("PULSAR_IDX_PROBE").is_some() && (2048..2060).contains(&(pos0 + i)) {
-                    let qh: u64 = q.iter().fold(0u64, |h, x| h.wrapping_mul(1099511628211).wrapping_add(x.to_bits() as u64));
-                    let wh: u64 = wgt.iter().fold(0u64, |h, x| h.wrapping_mul(1099511628211).wrapping_add(x.to_bits() as u64));
+                if std::env::var_os("PULSAR_IDX_PROBE").is_some()
+                    && (2048..2060).contains(&(pos0 + i))
+                {
+                    let qh: u64 = q.iter().fold(0u64, |h, x| {
+                        h.wrapping_mul(1099511628211)
+                            .wrapping_add(x.to_bits() as u64)
+                    });
+                    let wh: u64 = wgt.iter().fold(0u64, |h, x| {
+                        h.wrapping_mul(1099511628211)
+                            .wrapping_add(x.to_bits() as u64)
+                    });
                     probe_qh.push(qh);
                     probe_wh.push(wh);
                     // device-cache row hashes at the probe position: the
@@ -1380,18 +1717,26 @@ impl Model {
                         for (r, chunk) in rows.chunks_exact(nd).enumerate() {
                             let mut h = 0u64;
                             for &v in chunk {
-                                h = h.wrapping_mul(1099511628211).wrapping_add(v.to_bits() as u64);
+                                h = h
+                                    .wrapping_mul(1099511628211)
+                                    .wrapping_add(v.to_bits() as u64);
                             }
                             eprintln!("bhrow pos={} r={r} h={h:x}", pos0 + i);
                         }
                     }
                 }
                 kernels::dsv4_idx_scores_one_batch_at(
-                    &mut rt.idx_scores, score_off,
-                    &rt.idx_q_prep, q_off,
-                    &rt.idx_w, i as usize * nh * 4,
+                    &mut rt.idx_scores,
+                    score_off,
+                    &rt.idx_q_prep,
+                    q_off,
+                    &rt.idx_w,
+                    i as usize * nh * 4,
                     &lrt.idx_cache,
-                    n as u32, s.n_idx_head, s.n_idx_dim, scale,
+                    n as u32,
+                    s.n_idx_head,
+                    s.n_idx_dim,
+                    scale,
                 )?;
                 q_off += qw * 4;
                 score_off += cap * 4;
@@ -1479,13 +1824,29 @@ impl Model {
                     let n = idx_mask_ncomp[k] as usize;
                     let base = k * cap;
                     let mask = &mask_blob[base..base + n];
-                    let h: u64 = mask.iter().enumerate().filter(|(_, m)| **m == 1).map(|(c, _)| c as u64 * 2654435761).fold(0u64, u64::wrapping_add);
-                    let n_empty: usize = mask.chunks(128).filter(|c| c.iter().all(|&m| m == 0)).count();
+                    let h: u64 = mask
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, m)| **m == 1)
+                        .map(|(c, _)| c as u64 * 2654435761)
+                        .fold(0u64, u64::wrapping_add);
+                    let n_empty: usize = mask
+                        .chunks(128)
+                        .filter(|c| c.iter().all(|&m| m == 0))
+                        .count();
                     let n_chunks = mask.len().div_ceil(128);
-                    eprintln!("batch-mask L{il} @{} n={} empty_chunks={}/{} h={h:x}", pos0 + i, n, n_empty, n_chunks);
+                    eprintln!(
+                        "batch-mask L{il} @{} n={} empty_chunks={}/{} h={h:x}",
+                        pos0 + i,
+                        n,
+                        n_empty,
+                        n_chunks
+                    );
                 }
             }
-            if std::env::var_os("PULSAR_IDX_PROBE").is_some() && (2048..2060).contains(&(pos0 + idx_mask_i.first().copied().unwrap_or(0) as u32)) {
+            if std::env::var_os("PULSAR_IDX_PROBE").is_some()
+                && (2048..2060).contains(&(pos0 + idx_mask_i.first().copied().unwrap_or(0) as u32))
+            {
                 for (k, &i) in idx_mask_i.iter().enumerate() {
                     let n = idx_mask_ncomp[k] as usize;
                     let base = k * cap;
@@ -1493,8 +1854,14 @@ impl Model {
                     let (mut mx, mut mn) = (f32::NEG_INFINITY, f32::INFINITY);
                     let (mut ax, mut an) = (0usize, 0usize);
                     for (c, &s) in scores.iter().enumerate() {
-                        if s > mx { mx = s; ax = c; }
-                        if s < mn { mn = s; an = c; }
+                        if s > mx {
+                            mx = s;
+                            ax = c;
+                        }
+                        if s < mn {
+                            mn = s;
+                            an = c;
+                        }
                     }
                     let qh: u64 = probe_qh.get(k).copied().unwrap_or(0);
                     let wh: u64 = probe_wh.get(k).copied().unwrap_or(0);
@@ -1539,7 +1906,8 @@ impl Model {
         // per emit (measured: the per-emit syncs cost ~4.5s of the 4.7s
         // loop time on the 3 indexer layers). Host-path only: GPU mode
         // scores off the device cache, so the bulk mirror is dead work.
-        if w.idx.is_some() && !idx_mask_can_fire && std::env::var_os("PULSAR_NO_GPU_IDX").is_some() {
+        if w.idx.is_some() && !idx_mask_can_fire && std::env::var_os("PULSAR_NO_GPU_IDX").is_some()
+        {
             let lrt = &mut rt.layers[il];
             if lrt.n_idx_comp > 0 {
                 let all = lrt
@@ -1560,29 +1928,79 @@ impl Model {
         }
         if std::env::var_os("PULSAR_L0_LOG").is_some() && il <= 2 && (2046..2051).contains(&pos0) {
             kernels::sync()?;
-            eprintln!("stage L{il} @{pos0} t={t} heads={:x}", l0_hash(&st.heads, q_dim as usize));
+            eprintln!(
+                "stage L{il} @{pos0} t={t} heads={:x}",
+                l0_hash(&st.heads, q_dim as usize)
+            );
         }
         // ---- batched tail: un-rope, grouped out, hc_post
         let t_tail = std::time::Instant::now();
-        kernels::dsv4_rope_tail(&mut st.heads, t, s.n_head, s.head_dim, s.rot_dim, pos0, &rope, true)?;
+        kernels::dsv4_rope_tail(
+            &mut st.heads,
+            t,
+            s.n_head,
+            s.head_dim,
+            s.rot_dim,
+            pos0,
+            &rope,
+            true,
+        )?;
         let rank = 1024usize;
         let group_dim = q_dim / s.n_out_group;
         // heads is [t][n_out_group] contiguous group_dim slices and low is
         // [t][n_out_group] contiguous rank rows, so all t*8 grouped
         // projections collapse into one banked launch (bitwise identical
         // to the per-(token,group) loop).
-        kernels::matmul_q8_0_banked(&mut rt.low, &w.out_a, &st.heads, group_dim, rank as u32, s.n_out_group, t)?;
-        kernels::matmul_q8_0(&mut st.attn_out, &l.attn_output, &rt.low, (s.n_out_group as usize * rank) as u32, s.n_embd, t)?;
+        kernels::matmul_q8_0_banked(
+            &mut rt.low,
+            &w.out_a,
+            &st.heads,
+            group_dim,
+            rank as u32,
+            s.n_out_group,
+            t,
+        )?;
+        kernels::matmul_q8_0(
+            &mut st.attn_out,
+            &l.attn_output,
+            &rt.low,
+            (s.n_out_group as usize * rank) as u32,
+            s.n_embd,
+            t,
+        )?;
         self.dsv4_hc_post(rt, &st.attn_out, false, t)?;
 
         // ---- ffn half: ONE router readback + ONE MoE union per chunk
         let t_ffn = std::time::Instant::now();
-        self.dsv4_hc_pre(st, rt, &w.hc_ffn_fn, &w.hc_ffn_scale, &w.hc_ffn_base, true, t)?;
+        self.dsv4_hc_pre(
+            st,
+            rt,
+            &w.hc_ffn_fn,
+            &w.hc_ffn_scale,
+            &w.hc_ffn_base,
+            true,
+            t,
+        )?;
         kernels::rms_norm(&mut st.normed, &st.cur, &l.ffn_norm, s.n_embd, t, eps)?;
-        let Ffn::Moe { gate_inp, shexp, gate_exps, up_exps, down_exps, .. } = &l.ffn else {
+        let Ffn::Moe {
+            gate_inp,
+            shexp,
+            gate_exps,
+            up_exps,
+            down_exps,
+            ..
+        } = &l.ffn
+        else {
             return Err("dsv4 layer without MoE ffn".into());
         };
-        kernels::matmul_f32(&mut st.router_logits, gate_inp, &st.normed, s.n_embd, s.n_expert, t)?;
+        kernels::matmul_f32(
+            &mut st.router_logits,
+            gate_inp,
+            &st.normed,
+            s.n_embd,
+            s.n_expert,
+            t,
+        )?;
         let t_route = std::time::Instant::now();
         let logits = st.router_logits.read_f32((t * s.n_expert) as usize)?;
         let t_route_read = std::time::Instant::now();
@@ -1609,16 +2027,39 @@ impl Model {
         if let Some((sg, su, sd)) = shexp {
             kernels::matmul_q8_0(&mut st.gate_act, sg, &st.normed, s.n_embd, s.n_ff_exp, t)?;
             kernels::matmul_q8_0(&mut st.up_act, su, &st.normed, s.n_embd, s.n_ff_exp, t)?;
-            kernels::swiglu(&mut st.ffn_mid, &st.gate_act, &st.up_act, t * s.n_ff_exp, s.clamp_exp, 1.0, 0)?;
+            kernels::swiglu(
+                &mut st.ffn_mid,
+                &st.gate_act,
+                &st.up_act,
+                t * s.n_ff_exp,
+                s.clamp_exp,
+                1.0,
+                0,
+            )?;
             kernels::matmul_q8_0(&mut st.shared_out, sd, &st.ffn_mid, s.n_ff_exp, s.n_embd, t)?;
         } else {
             kernels::zero(&mut st.shared_out, (t * s.n_embd) as usize * 4)?;
         }
         kernels::quantize_q8_k(&mut st.xq, &st.normed, s.n_embd, t)?;
-        self.dsv4_moe(st, il, &selected, gate_exps, up_exps, down_exps, 3, t, self.shape.n_embd)?;
+        self.dsv4_moe(
+            st,
+            il,
+            &selected,
+            gate_exps,
+            up_exps,
+            down_exps,
+            3,
+            t,
+            self.shape.n_embd,
+        )?;
         if std::env::var_os("PULSAR_L0_LOG").is_some() && il <= 2 && (2046..2051).contains(&pos0) {
             kernels::sync()?;
-            eprintln!("stage L{il} @{pos0} t={t} moe={:x} shexp={:x} sel={:?}", l0_hash(&st.moe_out, s.n_embd as usize), l0_hash(&st.shared_out, s.n_embd as usize), &selected[..s.n_expert_used.min(8) as usize]);
+            eprintln!(
+                "stage L{il} @{pos0} t={t} moe={:x} shexp={:x} sel={:?}",
+                l0_hash(&st.moe_out, s.n_embd as usize),
+                l0_hash(&st.shared_out, s.n_embd as usize),
+                &selected[..s.n_expert_used.min(8) as usize]
+            );
         }
         kernels::add(&mut st.ffn_out, &st.moe_out, &st.shared_out, t * s.n_embd)?;
         self.dsv4_hc_post(rt, &st.ffn_out, true, t)?;
@@ -1643,9 +2084,23 @@ impl Model {
     /// tier and CPU-lane paths re-read and re-quantize it rather than
     /// reusing st.xq.
     #[allow(clippy::too_many_arguments)]
-    pub(super) fn dsv4_moe(&self, st: &mut State, il: usize, selected: &[i32], gate_exps: &super::ExpertTensor, up_exps: &super::ExpertTensor, down_exps: &super::ExpertTensor, act_op: u32, n_tok: u32, w_exp: u32) -> Result {
+    pub(super) fn dsv4_moe(
+        &self,
+        st: &mut State,
+        il: usize,
+        selected: &[i32],
+        gate_exps: &super::ExpertTensor,
+        up_exps: &super::ExpertTensor,
+        down_exps: &super::ExpertTensor,
+        act_op: u32,
+        n_tok: u32,
+        w_exp: u32,
+    ) -> Result {
         let s = self.shape;
         let primary = kernels::get_device();
+        // per-layer swiglu clamp (bailingmoe3 routed experts); 0 for families
+        // whose clamp is baked into act_op (dsv4 op 3, k3 op 4) or absent.
+        let clamp = self.clamp_exp_l.get(il).copied().unwrap_or(0.0);
         // Claim cross-layer async H2D prefetch (dsv4 layer-crossing port of
         // the MLA pattern): the previous layer queued this layer's predicted
         // experts into staging_alt. Drain it into resolved BEFORE the
@@ -1688,7 +2143,18 @@ impl Model {
                 if let (Some(&g), Some(&u), Some(&d)) =
                     (t.map.get(&g_off), t.map.get(&u_off), t.map.get(&d_off))
                 {
-                    tier_map.insert(e, (ti, kernels::ExpertPtrs { gate: g, up: u, down: d, ..kernels::ExpertPtrs::NULL }));
+                    tier_map.insert(
+                        e,
+                        (
+                            ti,
+                            kernels::ExpertPtrs {
+                                gate: g,
+                                up: u,
+                                down: d,
+                                ..kernels::ExpertPtrs::NULL
+                            },
+                        ),
+                    );
                     break;
                 }
             }
@@ -1713,6 +2179,7 @@ impl Model {
             w_exp as usize,
             s.n_ff_exp as usize,
             act_op,
+            clamp,
         );
         let mut cpu_guard: Option<super::cpu_tier::WaitGuard> = None;
         // PULSAR_CPU_STEAL=0: leave dev-cache-resident experts to the GPU
@@ -1734,7 +2201,11 @@ impl Model {
                 {
                     continue;
                 }
-                if self.mtp.as_ref().is_some_and(|mt| mt.res_map.contains_key(&go)) {
+                if self
+                    .mtp
+                    .as_ref()
+                    .is_some_and(|mt| mt.res_map.contains_key(&go))
+                {
                     continue;
                 }
                 let (Some(gp), Some(upp), Some(dp)) = (
@@ -1750,12 +2221,21 @@ impl Model {
             st.store.pinned = pins;
         }
         if !lane.is_empty() {
-            let rw = st.router_weights.read_f32(n_tok as usize * s.n_expert_used as usize)?;
+            let rw = st
+                .router_weights
+                .read_f32(n_tok as usize * s.n_expert_used as usize)?;
             let normed_h = st.normed.read_f32(n_tok as usize * w_exp as usize)?;
             let pool = st.cpu_pool.as_ref().unwrap();
             cpu_guard = Some(super::cpu_tier::WaitGuard {
                 pool,
-                n: lane.submit_a(pool, selected, s.n_expert_used as usize, &normed_h, &rw, n_tok as usize),
+                n: lane.submit_a(
+                    pool,
+                    selected,
+                    s.n_expert_used as usize,
+                    &normed_h,
+                    &rw,
+                    n_tok as usize,
+                ),
             });
         }
         let mut offsets = Vec::with_capacity(3 * distinct.len());
@@ -1765,7 +2245,11 @@ impl Model {
                 // freezes at placement time
                 for t in [gate_exps, up_exps, down_exps] {
                     let off = t.abs_offset + e as u64 * t.expert_bytes;
-                    st.dev_cache.touch.entry(off).or_insert((0, t.expert_bytes)).0 += 1;
+                    st.dev_cache
+                        .touch
+                        .entry(off)
+                        .or_insert((0, t.expert_bytes))
+                        .0 += 1;
                 }
                 continue;
             }
@@ -1886,7 +2370,15 @@ impl Model {
             && 2 * gate_exps.row_bytes.max(up_exps.row_bytes) * 4 <= 49152
             && down_exps.row_bytes * 4 <= 49152
             && std::env::var_os("PULSAR_NO_GROUPED").is_none();
-        let mut active = Vec::new();
+        let mut flat_tiers = Vec::new();
+        let mut grouped_tiers: Vec<usize> = Vec::new();
+        // st.normed / st.router_weights are produced on the primary PTDS,
+        // but the tier input copies below read them through a NULL-stream
+        // memcpy, which has no implicit ordering vs the PTDS. Flush the
+        // primary first so every tier sees fully-written inputs (redundant
+        // with bailing's pre-MoE sync, but keeps dsv4_moe self-contained).
+        kernels::set_device(primary)?;
+        kernels::sync()?;
         for ti in 0..st.tiers.len() {
             if tier_slots[ti] == 0 {
                 continue;
@@ -1932,68 +2424,206 @@ impl Model {
                     tier.grp_starts.write(0, kernels::as_bytes(&starts))?;
                     tier.grp_pairs.write(0, kernels::as_bytes(&pairs))?;
                     kernels::moe_pair_swiglu_grouped(
-                        &mut tier.mid, &tier.grp_ptrs, &tier.grp_starts, &tier.grp_pairs,
-                        &tier.weights, &tier.xq,
-                        w_exp, s.n_ff_exp, s.n_expert_used, n_group,
-                        gate_exps.row_bytes, gate_exps.quant, act_op,
+                        &mut tier.mid,
+                        &tier.grp_ptrs,
+                        &tier.grp_starts,
+                        &tier.grp_pairs,
+                        &tier.weights,
+                        &tier.xq,
+                        w_exp,
+                        s.n_ff_exp,
+                        s.n_expert_used,
+                        n_group,
+                        gate_exps.row_bytes,
+                        clamp,
+                        gate_exps.quant,
+                        act_op,
                     )?;
-                    kernels::quantize_q8_k(&mut tier.midq, &tier.mid, s.n_ff_exp, n_tok * s.n_expert_used)?;
+                    kernels::quantize_q8_k(
+                        &mut tier.midq,
+                        &tier.mid,
+                        s.n_ff_exp,
+                        n_tok * s.n_expert_used,
+                    )?;
                     let pbytes = n_tok as usize * s.n_expert_used as usize * w_exp as usize * 4;
                     if tier.grp_partial.bytes() < pbytes {
                         tier.grp_partial = DeviceBuf::alloc(pbytes)?;
                     }
                     kernels::zero(&mut tier.grp_partial, pbytes)?;
                     kernels::moe_down_grouped(
-                        &mut tier.grp_partial, &tier.grp_ptrs, &tier.grp_starts, &tier.grp_pairs,
+                        &mut tier.grp_partial,
+                        &tier.grp_ptrs,
+                        &tier.grp_starts,
+                        &tier.grp_pairs,
                         &tier.midq,
-                        s.n_ff_exp, w_exp, s.n_expert_used, n_group,
-                        down_exps.row_bytes, down_exps.quant,
+                        s.n_ff_exp,
+                        w_exp,
+                        s.n_expert_used,
+                        n_group,
+                        down_exps.row_bytes,
+                        down_exps.quant,
                     )?;
-                    kernels::moe_slot_sum(&mut tier.out, &tier.grp_partial, w_exp, s.n_expert_used, n_tok)?;
+                    kernels::moe_slot_sum(
+                        &mut tier.out,
+                        &tier.grp_partial,
+                        w_exp,
+                        s.n_expert_used,
+                        n_tok,
+                    )?;
                     ran_grouped = true;
+                    // Keep this tier in the summed grouped join below.
+                    // Omitting it silently discarded every routed slot that
+                    // took the grouped path.
+                    grouped_tiers.push(ti);
                 }
             }
             if !ran_grouped {
                 tier.ptrs.write(0, kernels::as_bytes(&tptrs[ti]))?;
                 kernels::moe_pair_swiglu(
-                    &mut tier.mid, &tier.ptrs, &tier.weights, &tier.xq,
-                    w_exp, s.n_ff_exp, s.n_expert_used, n_tok, gate_exps.row_bytes, gate_exps.quant, act_op,
+                    &mut tier.mid,
+                    &tier.ptrs,
+                    &tier.weights,
+                    &tier.xq,
+                    w_exp,
+                    s.n_ff_exp,
+                    s.n_expert_used,
+                    n_tok,
+                    gate_exps.row_bytes,
+                    clamp,
+                    gate_exps.quant,
+                    act_op,
                 )?;
-                kernels::quantize_q8_k(&mut tier.midq, &tier.mid, s.n_ff_exp, n_tok * s.n_expert_used)?;
-                kernels::moe_down(
-                    &mut tier.out, &tier.ptrs, &tier.midq,
-                    s.n_ff_exp, w_exp, s.n_expert_used, n_tok, down_exps.row_bytes, down_exps.quant,
+                kernels::quantize_q8_k(
+                    &mut tier.midq,
+                    &tier.mid,
+                    s.n_ff_exp,
+                    n_tok * s.n_expert_used,
                 )?;
+                // per-slot, UNSUMMED: the primary splices these into its
+                // own accumulation at the slot's position, so the f32 add
+                // sequence is identical to the single-device loop
+                let sbytes = n_tok as usize * s.n_expert_used as usize * w_exp as usize * 4;
+                if tier.slot_out.bytes() < sbytes {
+                    tier.slot_out = DeviceBuf::alloc(sbytes)?;
+                }
+                kernels::moe_down_per_slot(
+                    &mut tier.slot_out,
+                    &tier.ptrs,
+                    &tier.midq,
+                    s.n_ff_exp,
+                    w_exp,
+                    s.n_expert_used,
+                    n_tok,
+                    down_exps.row_bytes,
+                    down_exps.quant,
+                )?;
+                flat_tiers.push(ti);
             }
             kernels::set_device(primary)?;
-            active.push(ti);
+        }
+        // The primary owns the non-tier slots.  Rebuild their activations
+        // every layer; tier slots are NULL here and are supplied via `ext`.
+        kernels::moe_pair_swiglu(
+            &mut st.moe_mid,
+            &st.expert_ptrs,
+            &st.router_weights,
+            &st.xq,
+            w_exp,
+            s.n_ff_exp,
+            s.n_expert_used,
+            n_tok,
+            gate_exps.row_bytes,
+            clamp,
+            gate_exps.quant,
+            act_op,
+        )?;
+        kernels::quantize_q8_k(
+            &mut st.midq,
+            &st.moe_mid,
+            s.n_ff_exp,
+            n_tok * s.n_expert_used,
+        )?;
+
+        // resident-tier slots ride in `ext` ([n_tok][n_used][out_dim]):
+        // each tier's per-slot down results were computed by the identical
+        // reduction over identical bytes, and the primary's moe_down
+        // inserts them at their slot positions inside its canonical
+        // accumulation - bit-exact vs the single-device loop, no reordering.
+        let legacy = std::env::var_os("PULSAR_TIER_LEGACY").is_some();
+        let mut ext: Option<&DeviceBuf> = None;
+        if !flat_tiers.is_empty() && !legacy {
+            let n = n_tok as usize * s.n_expert_used as usize * w_exp as usize * 4;
+            if st.tier_ext.bytes() < n {
+                st.tier_ext = DeviceBuf::alloc(n)?;
+            }
+            kernels::zero(&mut st.tier_ext, n)?;
+            // merge every flat tier's per-slot rows (slot sets are disjoint;
+            // zero rows from other slots add nothing and are never read -
+            // moe_down consults ext only for its own NULL-down slots)
+            for &ti in &flat_tiers {
+                let tier = &st.tiers[ti];
+                kernels::set_device(tier.dev)?;
+                kernels::sync()?;
+                kernels::copy_across(&mut st.tier_tmp, &tier.slot_out, n)?;
+                kernels::set_device(primary)?;
+                kernels::add_assign(&mut st.tier_ext, &st.tier_tmp, (n / 4) as u32)?;
+            }
+            ext = Some(&st.tier_ext);
+        }
+        if legacy {
+            // DIAGNOSTIC: old-style summed join over the new per-slot
+            // buffers - isolates per-slot value correctness from splice
+            // insertion correctness
+            for &ti in &flat_tiers {
+                let tier = &mut st.tiers[ti];
+                kernels::set_device(tier.dev)?;
+                kernels::moe_slot_sum(
+                    &mut tier.out,
+                    &tier.slot_out,
+                    w_exp,
+                    s.n_expert_used,
+                    n_tok,
+                )?;
+                kernels::set_device(primary)?;
+            }
+        }
+        kernels::moe_down(
+            &mut st.moe_out,
+            &st.expert_ptrs,
+            &st.midq,
+            s.n_ff_exp,
+            w_exp,
+            s.n_expert_used,
+            n_tok,
+            down_exps.row_bytes,
+            down_exps.quant,
+            ext,
+        )?;
+
+        if legacy {
+            for ti in &flat_tiers {
+                let n = (n_tok * w_exp) as usize * 4;
+                let tier = &st.tiers[*ti];
+                kernels::set_device(tier.dev)?;
+                kernels::sync()?;
+                kernels::copy_across(&mut st.tier_ret, &tier.out, n)?;
+                kernels::set_device(primary)?;
+                kernels::add_assign(&mut st.moe_out, &st.tier_ret, n_tok * w_exp)?;
+            }
         }
 
-        // router weight applies before the down projection (ds4 order);
-        // act_op 3 = deepseek4 clamped silu, 0 = plain silu (qwen35)
-        kernels::moe_pair_swiglu(
-            &mut st.moe_mid, &st.expert_ptrs, &st.router_weights, &st.xq,
-            w_exp, s.n_ff_exp, s.n_expert_used, n_tok, gate_exps.row_bytes, gate_exps.quant, act_op,
-        )?;
-        kernels::quantize_q8_k(&mut st.midq, &st.moe_mid, s.n_ff_exp, n_tok * s.n_expert_used)?;
-        kernels::moe_down(
-            &mut st.moe_out, &st.expert_ptrs, &st.midq,
-            s.n_ff_exp, w_exp, s.n_expert_used, n_tok, down_exps.row_bytes, down_exps.quant,
-        )?;
-
-        // gather tier partials (blocking copy issued on the tier device
-        // = ordered after its kernels). NOTE: summing partials reorders
-        // float adds vs the single-device loop - the documented tier
-        // drift class; PULSAR_TIERS=off restores exact.
-        for ti in active {
+        // grouped-path tiers (verify chunks of the other families) still
+        // join with a summed partial - that reorder is their documented
+        // drift class; converting grouped to per-slot splice is future work
+        for ti in grouped_tiers {
             let n = (n_tok * w_exp) as usize * 4;
             let tier = &st.tiers[ti];
             kernels::set_device(tier.dev)?;
+            kernels::sync()?;
             kernels::copy_across(&mut st.tier_ret, &tier.out, n)?;
             kernels::set_device(primary)?;
             kernels::add_assign(&mut st.moe_out, &st.tier_ret, n_tok * w_exp)?;
         }
-
         // CPU-lane join: stage A ran under ensure_with + the launches
         // above; down-proj partials compute here while the GPU kernels
         // are still in flight, then one f32 upload joins moe_out.
@@ -2026,7 +2656,8 @@ impl Model {
         // [455,...] off). MLA's prefetch works only because decode predicts
         // the next token deterministically (MTP); prefill has no such source.
         // Kept only for analysis; DO NOT enable.
-        if false && std::env::var_os("PULSAR_H2D_PREFETCH").is_some()
+        if false
+            && std::env::var_os("PULSAR_H2D_PREFETCH").is_some()
             && st.async_expert_h2d
             && n_tok > 1
             && il + 1 < self.layers.len()
@@ -2126,7 +2757,9 @@ mod tests {
 
     #[test]
     fn route_weights_normalized_and_scaled() {
-        let logits: Vec<f32> = (0..256).map(|i| ((i * 37) % 100) as f32 / 25.0 - 2.0).collect();
+        let logits: Vec<f32> = (0..256)
+            .map(|i| ((i * 37) % 100) as f32 / 25.0 - 2.0)
+            .collect();
         let bias: Vec<f32> = (0..256).map(|i| ((i * 17) % 50) as f32 / 100.0).collect();
         let (sel, w) = route(&logits, &bias, None, 0, 6, 1.5).unwrap();
         assert_eq!(sel.len(), 6);
@@ -2135,7 +2768,10 @@ mod tests {
         uniq.dedup();
         assert_eq!(uniq.len(), 6, "distinct experts");
         let sum: f32 = w.iter().sum();
-        assert!((sum - 1.5).abs() < 1.0e-4, "weights sum to the scale, got {sum}");
+        assert!(
+            (sum - 1.5).abs() < 1.0e-4,
+            "weights sum to the scale, got {sum}"
+        );
         // hash override wins selection but weights still come from probs
         let table: Vec<i32> = (0..6).collect();
         let (sel2, w2) = route(&logits, &bias, Some(&table.clone()), 0, 6, 1.5).unwrap();
@@ -2189,8 +2825,8 @@ mod tests {
         assert_eq!(f32_to_f16_rte(0.0), 0x0000);
         assert_eq!(f32_to_f16_rte(65504.0), 0x7bff);
         assert_eq!(f32_to_f16_rte(1.0e6), 0x7c00); // overflow -> inf
-        // 1 + 2^-11 is exactly halfway between 1.0 and the next half
-        // value 1+2^-10; nearest-even keeps 1.0
+                                                   // 1 + 2^-11 is exactly halfway between 1.0 and the next half
+                                                   // value 1+2^-10; nearest-even keeps 1.0
         assert_eq!(f32_to_f16_rte(1.0 + 2.0f32.powi(-11)), 0x3c00);
         let roundtrip = super::super::requant::f16_to_f32(f32_to_f16_rte(0.333_333_34));
         assert!((roundtrip - 0.333_333_34).abs() < 3.0e-4);
@@ -2207,8 +2843,12 @@ mod tests {
         let rope = rope_cfg_test();
         let mut emitted = 0;
         for pos in 0..8u32 {
-            let kv: Vec<f32> = (0..width).map(|j| (pos as f32 + j as f32 * 0.1).sin()).collect();
-            let sc: Vec<f32> = (0..width).map(|j| (pos as f32 * 0.3 + j as f32 * 0.05).cos()).collect();
+            let kv: Vec<f32> = (0..width)
+                .map(|j| (pos as f32 + j as f32 * 0.1).sin())
+                .collect();
+            let sc: Vec<f32> = (0..width)
+                .map(|j| (pos as f32 * 0.3 + j as f32 * 0.05).cos())
+                .collect();
             let out = lane.step(&kv, &sc, &ape, &norm, pos, 1.0e-6, &rope, 2);
             if (pos + 1) % ratio == 0 {
                 let row = out.expect("boundary should emit");
@@ -2242,12 +2882,17 @@ mod tests {
             *v = (i as f32 * 0.031).cos();
         }
         let rope = rope_cfg_test();
-        let mask = indexer_allowed(&mut q, &weights, &cache, n_comp, n_head, hd, top_k, 7, &rope, 64)
-            .expect("n_comp > top_k selects");
+        let mask = indexer_allowed(
+            &mut q, &weights, &cache, n_comp, n_head, hd, top_k, 7, &rope, 64,
+        )
+        .expect("n_comp > top_k selects");
         assert_eq!(mask.iter().filter(|&&m| m == 1).count(), top_k);
         // all-visible fast path
         let mut q2 = vec![0f32; n_head * hd];
-        assert!(indexer_allowed(&mut q2, &weights, &cache, top_k, n_head, hd, top_k, 7, &rope, 64).is_none());
+        assert!(
+            indexer_allowed(&mut q2, &weights, &cache, top_k, n_head, hd, top_k, 7, &rope, 64)
+                .is_none()
+        );
     }
 
     fn rope_cfg_test() -> kernels::RopeCfg {
@@ -2365,7 +3010,13 @@ pub(super) fn ckpt_read(inp: &mut &[u8]) -> Result<Vec<Dsv4LayerCkpt>> {
         *inp = &inp[4..];
         let host_len = u64::from_le_bytes(inp[..8].try_into().unwrap()) as usize;
         *inp = &inp[8..];
-        out.push(Dsv4LayerCkpt { comp, n_comp, idx, n_idx_comp, host_len });
+        out.push(Dsv4LayerCkpt {
+            comp,
+            n_comp,
+            idx,
+            n_idx_comp,
+            host_len,
+        });
     }
     Ok(out)
 }
@@ -2404,7 +3055,9 @@ impl Dsv4Rt {
             *inp = &inp[8..];
             l.idx_cache_host.clear();
             l.idx_cache_host.extend(
-                inp[..hl * 4].chunks_exact(4).map(|c| f32::from_le_bytes(c.try_into().unwrap())),
+                inp[..hl * 4]
+                    .chunks_exact(4)
+                    .map(|c| f32::from_le_bytes(c.try_into().unwrap())),
             );
             *inp = &inp[hl * 4..];
             // re-mirror the host cache into the device copy (selection
@@ -2419,6 +3072,9 @@ impl Dsv4Rt {
     /// (n_comp, n_idx_comp) per layer, for sizing the State-side cache
     /// prefixes in save_prefix.
     pub(super) fn layer_counts(&self) -> Vec<(u32, u32)> {
-        self.layers.iter().map(|l| (l.n_comp, l.n_idx_comp)).collect()
+        self.layers
+            .iter()
+            .map(|l| (l.n_comp, l.n_idx_comp))
+            .collect()
     }
 }

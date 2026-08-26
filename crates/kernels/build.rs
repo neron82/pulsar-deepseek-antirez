@@ -2,7 +2,11 @@ fn main() {
     if std::env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("linux") {
         return; // kernels are CUDA/Linux; other hosts get an empty crate
     }
-    println!("cargo:rerun-if-changed=cuda");
+    // NOTE: a directory path only re-fires when an ENTRY is added/removed -
+    // editing a file inside does not bump the dir mtime, which silently
+    // served stale PTX after in-place kernel edits. Track each file.
+    println!("cargo:rerun-if-changed=cuda/pulsar_kernels.cu");
+    println!("cargo:rerun-if-changed=cuda/bailing_kernels.inc");
     // One fatbin for every NVIDIA generation the kernels can serve. The
     // floor is dp4a = sm_61 (Pascal / GTX 10-series); nothing newer is
     // required (no tensor cores, no async-copy, static <=48KB shared).
@@ -36,7 +40,11 @@ fn main() {
     if let Some(ccbin) = pick_ccbin() {
         build.flag(&format!("-ccbin={ccbin}"));
     }
-    let list: Vec<&str> = archs.split(',').map(str::trim).filter(|s| !s.is_empty()).collect();
+    let list: Vec<&str> = archs
+        .split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .collect();
     for (i, a) in list.iter().enumerate() {
         let first = i == 0;
         let last = i + 1 == list.len();
@@ -49,7 +57,9 @@ fn main() {
         };
         build.flag("-gencode").flag(&code);
     }
-    build.file("cuda/pulsar_kernels.cu").compile("pulsar_kernels");
+    build
+        .file("cuda/pulsar_kernels.cu")
+        .compile("pulsar_kernels");
     println!("cargo:rustc-link-lib=cudart");
     println!("cargo:rustc-link-search=native=/usr/local/cuda/lib64");
 }

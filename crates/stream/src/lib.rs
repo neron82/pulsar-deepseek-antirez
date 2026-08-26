@@ -28,10 +28,9 @@ pub fn expert_reads(g: &Gguf, model_len: u64) -> Result<Vec<Read>, String> {
         if t.dims.len() != 3 || t.dims[2] != n_expert {
             return Err(format!("{}: unexpected exps dims {:?}", t.name, t.dims));
         }
-        let row = t
-            .ty
-            .row_bytes(t.dims[0])
-            .ok_or_else(|| format!("{}: unmodeled type {:?}", t.name, t.ty))?;
+        let row =
+            t.ty.row_bytes(t.dims[0])
+                .ok_or_else(|| format!("{}: unmodeled type {:?}", t.name, t.ty))?;
         let expert_bytes = row * t.dims[1];
         let base = g.data_offset + t.offset;
         for e in 0..n_expert {
@@ -39,7 +38,10 @@ pub fn expert_reads(g: &Gguf, model_len: u64) -> Result<Vec<Read>, String> {
             if offset + expert_bytes > model_len {
                 return Err(format!("{}: expert {} beyond eof", t.name, e));
             }
-            out.push(Read { offset, len: expert_bytes });
+            out.push(Read {
+                offset,
+                len: expert_bytes,
+            });
         }
     }
     if out.is_empty() {
@@ -118,7 +120,11 @@ pub mod uring {
             if ptr.is_null() {
                 return None;
             }
-            Some(Self { ptr, cap, custom_free: None })
+            Some(Self {
+                ptr,
+                cap,
+                custom_free: None,
+            })
         }
 
         /// Allocate via `a`, falling back to the default allocator when it
@@ -127,7 +133,11 @@ pub mod uring {
             if let Some(a) = a {
                 let ptr = (a.alloc)(cap);
                 if !ptr.is_null() {
-                    return Some(Self { ptr, cap, custom_free: Some(a.free) });
+                    return Some(Self {
+                        ptr,
+                        cap,
+                        custom_free: Some(a.free),
+                    });
                 }
             }
             Self::new(cap, align)
@@ -139,8 +149,7 @@ pub mod uring {
             match self.custom_free {
                 Some(free) => free(self.ptr, self.cap),
                 None => {
-                    let layout =
-                        std::alloc::Layout::from_size_align(self.cap, 4096).unwrap();
+                    let layout = std::alloc::Layout::from_size_align(self.cap, 4096).unwrap();
                     unsafe { std::alloc::dealloc(self.ptr, layout) }
                 }
             }
@@ -194,8 +203,7 @@ pub mod uring {
                 let r = reads[next];
                 let aligned_off = r.offset & !(align - 1);
                 let payload_off = (r.offset - aligned_off) as usize;
-                let disk_len =
-                    ((payload_off as u64 + r.len + align - 1) / align) * align;
+                let disk_len = ((payload_off as u64 + r.len + align - 1) / align) * align;
                 let slot = slots
                     .iter()
                     .position(|s| s.is_none())
@@ -204,9 +212,7 @@ pub mod uring {
                 // past a row that ends at the slab edge - up to 7 x 34B for
                 // q8_0 (see SLAB_SLACK in engine)
                 let buf = Aligned::new(disk_len as usize + 256, align as usize)
-                    .ok_or_else(|| {
-                        std::io::Error::from(std::io::ErrorKind::OutOfMemory)
-                    })?;
+                    .ok_or_else(|| std::io::Error::from(std::io::ErrorKind::OutOfMemory))?;
                 let sqe = opcode::Read::new(fd, buf.ptr, disk_len as u32)
                     .offset(aligned_off)
                     .build()
@@ -225,8 +231,10 @@ pub mod uring {
                 break;
             }
             ring.submit_and_wait(1)?;
-            let completions: Vec<(u64, i32)> =
-                ring.completion().map(|c| (c.user_data(), c.result())).collect();
+            let completions: Vec<(u64, i32)> = ring
+                .completion()
+                .map(|c| (c.user_data(), c.result()))
+                .collect();
             for (ud, res) in completions {
                 let slot = ud as usize;
                 let inf = slots[slot].take().expect("slot occupied");
@@ -237,9 +245,8 @@ pub mod uring {
                 stats.reads += 1;
                 stats.bytes_payload += inf.payload_len as u64;
                 // touch the payload so the read cannot be optimized away
-                stats.checksum ^= unsafe {
-                    *inf.buf.ptr.add(inf.payload_off + inf.payload_len / 2)
-                };
+                stats.checksum ^=
+                    unsafe { *inf.buf.ptr.add(inf.payload_off + inf.payload_len / 2) };
             }
         }
         stats.secs = t0.elapsed().as_secs_f64();
@@ -302,7 +309,11 @@ pub mod fetch {
             qd: usize,
             buf_alloc: Option<super::uring::BufAlloc>,
         ) -> std::io::Result<Fetcher> {
-            Self::open_split(std::slice::from_ref(&(0, path.to_path_buf())), qd, buf_alloc)
+            Self::open_split(
+                std::slice::from_ref(&(0, path.to_path_buf())),
+                qd,
+                buf_alloc,
+            )
         }
 
         /// Open a virtual file spanning shards: `shards[i]` = (virtual
@@ -320,7 +331,12 @@ pub mod fetch {
                     .open(path)?;
                 files.push((*base, file));
             }
-            Ok(Fetcher { ring: IoUring::new(qd as u32 * 2)?, files, qd, buf_alloc })
+            Ok(Fetcher {
+                ring: IoUring::new(qd as u32 * 2)?,
+                files,
+                qd,
+                buf_alloc,
+            })
         }
 
         /// (fd, local offset) for a virtual offset.
@@ -329,7 +345,10 @@ pub mod fetch {
                 Ok(i) => i,
                 Err(i) => i.saturating_sub(1),
             };
-            (types::Fd(self.files[i].1.as_raw_fd()), offset - self.files[i].0)
+            (
+                types::Fd(self.files[i].1.as_raw_fd()),
+                offset - self.files[i].0,
+            )
         }
 
         /// Fetch every read; result[i] corresponds to reads[i].
@@ -364,8 +383,9 @@ pub mod fetch {
                     let payload_off = (local - aligned_off) as usize;
                     let disk_len = (payload_off as u64 + r.len).next_multiple_of(ALIGN);
                     // +256: phantom-tail slack, same invariant as the fetch path
-                    let buf = Aligned::new_with(disk_len as usize + 256, ALIGN as usize, self.buf_alloc)
-                        .ok_or_else(|| std::io::Error::from(std::io::ErrorKind::OutOfMemory))?;
+                    let buf =
+                        Aligned::new_with(disk_len as usize + 256, ALIGN as usize, self.buf_alloc)
+                            .ok_or_else(|| std::io::Error::from(std::io::ErrorKind::OutOfMemory))?;
                     let sqe = opcode::Read::new(fd, buf.ptr(), disk_len as u32)
                         .offset(aligned_off)
                         .build()
@@ -410,8 +430,14 @@ mod tests {
     #[test]
     fn plan_roundtrip() {
         let reads = vec![
-            Read { offset: 4096, len: 1536 },
-            Read { offset: 1 << 33, len: 4718592 },
+            Read {
+                offset: 4096,
+                len: 1536,
+            },
+            Read {
+                offset: 1 << 33,
+                len: 4718592,
+            },
         ];
         assert_eq!(plan_from_str(&plan_to_string(&reads)).unwrap(), reads);
     }

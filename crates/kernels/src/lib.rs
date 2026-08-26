@@ -84,41 +84,318 @@ mod real {
         fn cudaMemset(ptr: *mut c_void, value: i32, bytes: usize) -> i32;
         fn cudaDeviceSynchronize() -> i32;
 
-        fn pulsar_embed_q8_0(out: *mut c_void, w: *const c_void, tokens: *const c_void, n_embd: u32, n_vocab: u32, n_tok: u32) -> i32;
-        fn pulsar_dspark_markov_argmax(logits: *const c_void, w2: *const c_void, state: *const c_void, vocab: u32, rank: u32, scratch: *mut c_void, out: *mut c_void) -> i32;
-        fn pulsar_rms_norm(out: *mut c_void, x: *const c_void, w: *const c_void, n: u32, rows: u32, eps: f32) -> i32;
-        fn pulsar_q8_0_matmul(out: *mut c_void, w: *const c_void, x: *const c_void, in_dim: u32, out_dim: u32, n_tok: u32) -> i32;
-        fn pulsar_q8_0_matmul_banked(out: *mut c_void, w: *const c_void, x: *const c_void, in_dim: u32, out_dim: u32, n_bank: u32, n_tok: u32) -> i32;
-        fn pulsar_matmul_f32(out: *mut c_void, w: *const c_void, x: *const c_void, in_dim: u32, out_dim: u32, n_tok: u32) -> i32;
-        fn pulsar_matmul_kq(out: *mut c_void, w: *const c_void, xq: *const c_void, in_dim: u32, out_dim: u32, n_tok: u32, row_bytes: u64, quant: u32) -> i32;
-        fn pulsar_idx_rope0(x: *mut c_void, n_tok: u32, n_head: u32, head_dim: u32, rot_dim: u32, pos0: u32, n_ctx_orig: u32, freq_base: f32, freq_scale: f32, ext_factor: f32, attn_factor: f32, beta_fast: f32, beta_slow: f32) -> i32;
-        fn pulsar_idx_store_k(raw_k: *const c_void, w: *const c_void, b: *const c_void, cache: *mut c_void, pos0: u32, n_tok: u32, cache_cap: u32, head_dim: u32, rot_dim: u32, n_ctx_orig: u32, eps: f32, freq_base: f32, freq_scale: f32, ext_factor: f32, attn_factor: f32, beta_fast: f32, beta_slow: f32, fp8: u32) -> i32;
-        fn pulsar_idx_score_one(scores: *mut c_void, q: *const c_void, weights: *const c_void, cache: *const c_void, n_rows: u32, n_head: u32, head_dim: u32, scale: f32, fp8: u32) -> i32;
-        fn pulsar_dsv4_idx_scores_one(scores: *mut c_void, q: *const c_void, weights: *const c_void, cache: *const c_void, n_rows: u32, n_head: u32, head_dim: u32, scale: f32) -> i32;
-        fn pulsar_idx_topk(selected: *mut c_void, scores: *const c_void, n_rows: u32, top_k: u32) -> i32;
-        fn pulsar_idx_scores_batch(scores: *mut c_void, q: *const c_void, weights: *const c_void, cache: *const c_void, q16: *mut c_void, n_rows: u32, n_tokens: u32, pos0: u32, n_head: u32, head_dim: u32, scale: f32, fp8: u32) -> i32;
+        fn pulsar_embed_q8_0(
+            out: *mut c_void,
+            w: *const c_void,
+            tokens: *const c_void,
+            n_embd: u32,
+            n_vocab: u32,
+            n_tok: u32,
+        ) -> i32;
+        fn pulsar_dspark_markov_argmax(
+            logits: *const c_void,
+            w2: *const c_void,
+            state: *const c_void,
+            vocab: u32,
+            rank: u32,
+            scratch: *mut c_void,
+            out: *mut c_void,
+        ) -> i32;
+        fn pulsar_rms_norm(
+            out: *mut c_void,
+            x: *const c_void,
+            w: *const c_void,
+            n: u32,
+            rows: u32,
+            eps: f32,
+        ) -> i32;
+        fn pulsar_q8_0_matmul(
+            out: *mut c_void,
+            w: *const c_void,
+            x: *const c_void,
+            in_dim: u32,
+            out_dim: u32,
+            n_tok: u32,
+        ) -> i32;
+        fn pulsar_q8_0_matmul_banked(
+            out: *mut c_void,
+            w: *const c_void,
+            x: *const c_void,
+            in_dim: u32,
+            out_dim: u32,
+            n_bank: u32,
+            n_tok: u32,
+        ) -> i32;
+        fn pulsar_matmul_f32(
+            out: *mut c_void,
+            w: *const c_void,
+            x: *const c_void,
+            in_dim: u32,
+            out_dim: u32,
+            n_tok: u32,
+        ) -> i32;
+        fn pulsar_matmul_kq(
+            out: *mut c_void,
+            w: *const c_void,
+            xq: *const c_void,
+            in_dim: u32,
+            out_dim: u32,
+            n_tok: u32,
+            row_bytes: u64,
+            quant: u32,
+        ) -> i32;
+        fn pulsar_idx_rope0(
+            x: *mut c_void,
+            n_tok: u32,
+            n_head: u32,
+            head_dim: u32,
+            rot_dim: u32,
+            pos0: u32,
+            n_ctx_orig: u32,
+            freq_base: f32,
+            freq_scale: f32,
+            ext_factor: f32,
+            attn_factor: f32,
+            beta_fast: f32,
+            beta_slow: f32,
+        ) -> i32;
+        fn pulsar_idx_store_k(
+            raw_k: *const c_void,
+            w: *const c_void,
+            b: *const c_void,
+            cache: *mut c_void,
+            pos0: u32,
+            n_tok: u32,
+            cache_cap: u32,
+            head_dim: u32,
+            rot_dim: u32,
+            n_ctx_orig: u32,
+            eps: f32,
+            freq_base: f32,
+            freq_scale: f32,
+            ext_factor: f32,
+            attn_factor: f32,
+            beta_fast: f32,
+            beta_slow: f32,
+            fp8: u32,
+        ) -> i32;
+        fn pulsar_idx_score_one(
+            scores: *mut c_void,
+            q: *const c_void,
+            weights: *const c_void,
+            cache: *const c_void,
+            n_rows: u32,
+            n_head: u32,
+            head_dim: u32,
+            scale: f32,
+            fp8: u32,
+        ) -> i32;
+        fn pulsar_dsv4_idx_scores_one(
+            scores: *mut c_void,
+            q: *const c_void,
+            weights: *const c_void,
+            cache: *const c_void,
+            n_rows: u32,
+            n_head: u32,
+            head_dim: u32,
+            scale: f32,
+        ) -> i32;
+        fn pulsar_idx_topk(
+            selected: *mut c_void,
+            scores: *const c_void,
+            n_rows: u32,
+            top_k: u32,
+        ) -> i32;
+        fn pulsar_idx_scores_batch(
+            scores: *mut c_void,
+            q: *const c_void,
+            weights: *const c_void,
+            cache: *const c_void,
+            q16: *mut c_void,
+            n_rows: u32,
+            n_tokens: u32,
+            pos0: u32,
+            n_head: u32,
+            head_dim: u32,
+            scale: f32,
+            fp8: u32,
+        ) -> i32;
         fn pulsar_idx_selftest() -> i32;
-        fn pulsar_swiglu(out: *mut c_void, gate: *const c_void, up: *const c_void, n: u32, clamp: f32, weight: f32, act_op: u32) -> i32;
+        fn pulsar_swiglu(
+            out: *mut c_void,
+            gate: *const c_void,
+            up: *const c_void,
+            n: u32,
+            clamp: f32,
+            weight: f32,
+            act_op: u32,
+        ) -> i32;
         fn pulsar_scale(x: *mut c_void, n: u32, c: f32) -> i32;
         fn pulsar_fill_row_tail(x: *mut c_void, rows: u32, row_w: u32, keep: u32, v: f32) -> i32;
         fn pulsar_softcap(x: *mut c_void, n: u32, cap: f32) -> i32;
-        fn pulsar_router_scale_selected(w: *mut c_void, sel: *const c_void, scale: *const c_void, n: u32, n_expert: u32) -> i32;
+        fn pulsar_router_scale_selected(
+            w: *mut c_void,
+            sel: *const c_void,
+            scale: *const c_void,
+            n: u32,
+            n_expert: u32,
+        ) -> i32;
         fn pulsar_add(out: *mut c_void, a: *const c_void, b: *const c_void, n: u32) -> i32;
-        fn pulsar_router_select(selected: *mut c_void, weights: *mut c_void, logits: *const c_void, bias: *const c_void, n_expert: u32, k_used: u32, weight_scale: f32, n_tok: u32, softmax_mode: u32, n_shexp: u32) -> i32;
-        fn pulsar_quantize_q8_K(out: *mut c_void, x: *const c_void, in_dim: u32, n_rows: u32) -> i32;
-        fn pulsar_moe_pair_swiglu(mid: *mut c_void, ptrs: *const c_void, weights: *const c_void, x: *const c_void, in_dim: u32, mid_dim: u32, n_used: u32, n_tok: u32, row_bytes: u64, quant: u32, act_op: u32) -> i32;
-        fn pulsar_moe_down(out: *mut c_void, ptrs: *const c_void, mid: *const c_void, mid_dim: u32, out_dim: u32, n_used: u32, n_tok: u32, row_bytes: u64, quant: u32) -> i32;
-        fn pulsar_moe_pair_swiglu_grouped(mid: *mut c_void, gptrs: *const c_void, starts: *const c_void, pairs: *const c_void, weights: *const c_void, xq: *const c_void, in_dim: u32, mid_dim: u32, n_used: u32, n_group: u32, row_bytes: u64, quant: u32, act_op: u32) -> i32;
-        fn pulsar_moe_down_grouped(partial: *mut c_void, gptrs: *const c_void, starts: *const c_void, pairs: *const c_void, midq: *const c_void, mid_dim: u32, out_dim: u32, n_used: u32, n_group: u32, row_bytes: u64, quant: u32) -> i32;
-        fn pulsar_moe_slot_sum(out: *mut c_void, partial: *const c_void, out_dim: u32, n_used: u32, n_tok: u32) -> i32;
-        fn pulsar_moe_down_bias(out: *mut c_void, ptrs: *const c_void, weights: *const c_void, out_dim: u32, n_used: u32, n_tok: u32) -> i32;
+        fn pulsar_router_select(
+            selected: *mut c_void,
+            weights: *mut c_void,
+            logits: *const c_void,
+            bias: *const c_void,
+            n_expert: u32,
+            k_used: u32,
+            weight_scale: f32,
+            n_tok: u32,
+            softmax_mode: u32,
+            n_shexp: u32,
+        ) -> i32;
+        fn pulsar_quantize_q8_K(
+            out: *mut c_void,
+            x: *const c_void,
+            in_dim: u32,
+            n_rows: u32,
+        ) -> i32;
+        fn pulsar_moe_pair_swiglu(
+            mid: *mut c_void,
+            ptrs: *const c_void,
+            weights: *const c_void,
+            x: *const c_void,
+            in_dim: u32,
+            mid_dim: u32,
+            n_used: u32,
+            n_tok: u32,
+            row_bytes: u64,
+            clamp: f32,
+            quant: u32,
+            act_op: u32,
+        ) -> i32;
+        fn pulsar_moe_down(
+            out: *mut c_void,
+            ptrs: *const c_void,
+            mid: *const c_void,
+            mid_dim: u32,
+            out_dim: u32,
+            n_used: u32,
+            n_tok: u32,
+            row_bytes: u64,
+            quant: u32,
+            ext: *const c_void,
+        ) -> i32;
+        fn pulsar_moe_down_per_slot(
+            out: *mut c_void,
+            ptrs: *const c_void,
+            mid: *const c_void,
+            mid_dim: u32,
+            out_dim: u32,
+            n_used: u32,
+            n_tok: u32,
+            row_bytes: u64,
+            quant: u32,
+        ) -> i32;
+        fn pulsar_moe_pair_swiglu_grouped(
+            mid: *mut c_void,
+            gptrs: *const c_void,
+            starts: *const c_void,
+            pairs: *const c_void,
+            weights: *const c_void,
+            xq: *const c_void,
+            in_dim: u32,
+            mid_dim: u32,
+            n_used: u32,
+            n_group: u32,
+            row_bytes: u64,
+            clamp: f32,
+            quant: u32,
+            act_op: u32,
+        ) -> i32;
+        fn pulsar_moe_down_grouped(
+            partial: *mut c_void,
+            gptrs: *const c_void,
+            starts: *const c_void,
+            pairs: *const c_void,
+            midq: *const c_void,
+            mid_dim: u32,
+            out_dim: u32,
+            n_used: u32,
+            n_group: u32,
+            row_bytes: u64,
+            quant: u32,
+        ) -> i32;
+        fn pulsar_moe_slot_sum(
+            out: *mut c_void,
+            partial: *const c_void,
+            out_dim: u32,
+            n_used: u32,
+            n_tok: u32,
+        ) -> i32;
+        fn pulsar_moe_down_bias(
+            out: *mut c_void,
+            ptrs: *const c_void,
+            weights: *const c_void,
+            out_dim: u32,
+            n_used: u32,
+            n_tok: u32,
+        ) -> i32;
         fn pulsar_add_bias_rows(x: *mut c_void, bias: *const c_void, dim: u32, rows: u32) -> i32;
-        fn pulsar_gqa_head_rms_norm(x: *mut c_void, w: *const c_void, rows: u32, head_dim: u32, eps: f32) -> i32;
-        fn pulsar_gqa_rope(x: *mut c_void, n_tok: u32, n_head: u32, head_dim: u32, rot_dim: u32, pos0: u32, theta: f32, factors: *const c_void) -> i32;
-        fn pulsar_gqa_kv_append(cache: *mut c_void, kv: *const c_void, n_tok: u32, n_kv_head: u32, head_dim: u32, cap: u32, pos0: u32, kvq: u32) -> i32;
-        fn pulsar_gqa_attention(out: *mut c_void, q: *const c_void, k_cache: *const c_void, v_cache: *const c_void, n_tok: u32, n_head: u32, n_kv_head: u32, head_dim: u32, cap: u32, pos0: u32, scale: f32, window: u32, rel: *const c_void, rel_extent: u32, kvq: u32, sinks: *const c_void) -> i32;
+        fn pulsar_gqa_head_rms_norm(
+            x: *mut c_void,
+            w: *const c_void,
+            rows: u32,
+            head_dim: u32,
+            eps: f32,
+        ) -> i32;
+        fn pulsar_gqa_rope(
+            x: *mut c_void,
+            n_tok: u32,
+            n_head: u32,
+            head_dim: u32,
+            rot_dim: u32,
+            pos0: u32,
+            theta: f32,
+            factors: *const c_void,
+        ) -> i32;
+        fn pulsar_gqa_kv_append(
+            cache: *mut c_void,
+            kv: *const c_void,
+            n_tok: u32,
+            n_kv_head: u32,
+            head_dim: u32,
+            cap: u32,
+            pos0: u32,
+            kvq: u32,
+        ) -> i32;
+        fn pulsar_gqa_attention(
+            out: *mut c_void,
+            q: *const c_void,
+            k_cache: *const c_void,
+            v_cache: *const c_void,
+            n_tok: u32,
+            n_head: u32,
+            n_kv_head: u32,
+            head_dim: u32,
+            cap: u32,
+            pos0: u32,
+            scale: f32,
+            window: u32,
+            rel: *const c_void,
+            rel_extent: u32,
+            kvq: u32,
+            sinks: *const c_void,
+        ) -> i32;
 
-        fn pulsar_sconv(out: *mut c_void, x: *const c_void, kern: *const c_void, state: *mut c_void, n_tok: u32, w: u32, k: u32) -> i32;
+        fn pulsar_sconv(
+            out: *mut c_void,
+            x: *const c_void,
+            kern: *const c_void,
+            state: *mut c_void,
+            n_tok: u32,
+            w: u32,
+            k: u32,
+        ) -> i32;
 
         fn pulsar_gqa_selftest() -> i32;
         fn pulsar_q8_0_matmul_selftest() -> i32;
@@ -128,45 +405,360 @@ mod real {
         fn pulsar_mla_selftest() -> i32;
         fn pulsar_sconv_selftest() -> i32;
 
-        fn pulsar_mla_rope_tail(x: *mut c_void, n_tok: u32, n_head: u32, head_dim: u32, rot_dim: u32, pos0: u32, n_ctx_orig: u32, freq_base: f32, freq_scale: f32, ext_factor: f32, attn_factor: f32, beta_fast: f32, beta_slow: f32) -> i32;
-        fn pulsar_dsv4_rope_tail(x: *mut c_void, n_tok: u32, n_head: u32, head_dim: u32, rot_dim: u32, pos0: u32, n_ctx_orig: u32, freq_base: f32, freq_scale: f32, ext_factor: f32, attn_factor: f32, beta_fast: f32, beta_slow: f32, inverse: u32) -> i32;
-        fn pulsar_dsv4_hc_mix(out: *mut c_void, streams: *const c_void, block: *const c_void, st_c: *const f32, blk_c: *const f32, n_embd: u32, n_hc: u32, n_out: u32) -> i32;
-        fn pulsar_dsv4_attention(out: *mut c_void, q: *const c_void, raw: *const c_void, n_raw: u32, comp: *const c_void, n_comp: u32, allowed: *const c_void, sinks: *const c_void, n_head: u32, head_dim: u32, scale: f32) -> i32;
+        fn pulsar_mla_rope_tail(
+            x: *mut c_void,
+            n_tok: u32,
+            n_head: u32,
+            head_dim: u32,
+            rot_dim: u32,
+            pos0: u32,
+            n_ctx_orig: u32,
+            freq_base: f32,
+            freq_scale: f32,
+            ext_factor: f32,
+            attn_factor: f32,
+            beta_fast: f32,
+            beta_slow: f32,
+        ) -> i32;
+        fn pulsar_dsv4_rope_tail(
+            x: *mut c_void,
+            n_tok: u32,
+            n_head: u32,
+            head_dim: u32,
+            rot_dim: u32,
+            pos0: u32,
+            n_ctx_orig: u32,
+            freq_base: f32,
+            freq_scale: f32,
+            ext_factor: f32,
+            attn_factor: f32,
+            beta_fast: f32,
+            beta_slow: f32,
+            inverse: u32,
+        ) -> i32;
+        fn pulsar_dsv4_hc_mix(
+            out: *mut c_void,
+            streams: *const c_void,
+            block: *const c_void,
+            st_c: *const f32,
+            blk_c: *const f32,
+            n_embd: u32,
+            n_hc: u32,
+            n_out: u32,
+        ) -> i32;
+        fn pulsar_dsv4_attention(
+            out: *mut c_void,
+            q: *const c_void,
+            raw: *const c_void,
+            n_raw: u32,
+            comp: *const c_void,
+            n_comp: u32,
+            allowed: *const c_void,
+            sinks: *const c_void,
+            n_head: u32,
+            head_dim: u32,
+            scale: f32,
+        ) -> i32;
         fn pulsar_dsv4_fp8_sim(x: *mut c_void, n_rows: u32, head_dim: u32, n_rot: u32) -> i32;
         fn pulsar_dsv4_f16_round(x: *mut c_void, n: u32) -> i32;
-        fn pulsar_dsv4_sinkhorn(coef: *mut c_void, mix: *const c_void, scale: *const c_void, base: *const c_void, n_hc: u32, iters: u32, eps: f32, n_tok: u32) -> i32;
-        fn pulsar_dsv4_hc_mix_dev(out: *mut c_void, streams: *const c_void, block: *const c_void, coef: *const c_void, st_off: u32, blk_off: i32, n_embd: u32, n_hc: u32, n_out: u32, n_tok: u32) -> i32;
-        fn pulsar_dsv4_comp_step(state_kv: *mut c_void, state_sc: *mut c_void, cache_row: *mut c_void, kv_cur: *const c_void, sc_cur: *const c_void, ape: *const c_void, norm: *const c_void, width: u32, head_dim: u32, ratio: u32, pos: u32, emit: u32, is_idx: u32, rms_eps: f32, n_rot: u32, n_ctx_orig: u32, freq_base: f32, freq_scale: f32, ext_factor: f32, attn_factor: f32) -> i32;
+        fn pulsar_dsv4_sinkhorn(
+            coef: *mut c_void,
+            mix: *const c_void,
+            scale: *const c_void,
+            base: *const c_void,
+            n_hc: u32,
+            iters: u32,
+            eps: f32,
+            n_tok: u32,
+        ) -> i32;
+        fn pulsar_dsv4_hc_mix_dev(
+            out: *mut c_void,
+            streams: *const c_void,
+            block: *const c_void,
+            coef: *const c_void,
+            st_off: u32,
+            blk_off: i32,
+            n_embd: u32,
+            n_hc: u32,
+            n_out: u32,
+            n_tok: u32,
+        ) -> i32;
+        fn pulsar_dsv4_comp_step(
+            state_kv: *mut c_void,
+            state_sc: *mut c_void,
+            cache_row: *mut c_void,
+            kv_cur: *const c_void,
+            sc_cur: *const c_void,
+            ape: *const c_void,
+            norm: *const c_void,
+            width: u32,
+            head_dim: u32,
+            ratio: u32,
+            pos: u32,
+            emit: u32,
+            is_idx: u32,
+            rms_eps: f32,
+            n_rot: u32,
+            n_ctx_orig: u32,
+            freq_base: f32,
+            freq_scale: f32,
+            ext_factor: f32,
+            attn_factor: f32,
+        ) -> i32;
         fn pulsar_dsv4_selftest() -> i32;
-        fn pulsar_qwen35_conv_step(out: *mut c_void, x: *const c_void, kern: *const c_void, state: *mut c_void, n_chan: u32, k: u32) -> i32;
+        fn pulsar_qwen35_conv_step(
+            out: *mut c_void,
+            x: *const c_void,
+            kern: *const c_void,
+            state: *mut c_void,
+            n_chan: u32,
+            k: u32,
+        ) -> i32;
         fn pulsar_qwen35_l2_norm(x: *mut c_void, rows: u32, dim: u32, eps: f32) -> i32;
-        fn pulsar_qwen35_gdn_step(out: *mut c_void, state: *mut c_void, q: *const c_void, k: *const c_void, v: *const c_void, g: *const c_void, beta: *const c_void, h_v: u32, h_k: u32, dim: u32) -> i32;
-        fn pulsar_qwen35_split_gate(q: *mut c_void, gate: *mut c_void, fused: *const c_void, n_head: u32, dim: u32) -> i32;
+        fn pulsar_qwen35_gdn_step(
+            out: *mut c_void,
+            state: *mut c_void,
+            q: *const c_void,
+            k: *const c_void,
+            v: *const c_void,
+            g: *const c_void,
+            beta: *const c_void,
+            h_v: u32,
+            h_k: u32,
+            dim: u32,
+        ) -> i32;
+        fn pulsar_qwen35_split_gate(
+            q: *mut c_void,
+            gate: *mut c_void,
+            fused: *const c_void,
+            n_head: u32,
+            dim: u32,
+        ) -> i32;
         fn pulsar_qwen35_sigmoid_gate(x: *mut c_void, gate: *const c_void, n: u32) -> i32;
-        fn pulsar_laguna_head_gate(x: *mut c_void, gate: *const c_void, n_tok: u32, n_head: u32, head_dim: u32) -> i32;
+        fn pulsar_laguna_head_gate(
+            x: *mut c_void,
+            gate: *const c_void,
+            n_tok: u32,
+            n_head: u32,
+            head_dim: u32,
+        ) -> i32;
         #[allow(clippy::too_many_arguments)]
-        fn pulsar_rope_yarn_partial(x: *mut c_void, n_tok: u32, n_head: u32, head_dim: u32, rot_dim: u32, pos0: u32, freq_base: f32, freq_scale: f32, ext_factor: f32, attn_factor: f32, beta_fast: f32, beta_slow: f32, n_ctx_orig: u32) -> i32;
-        fn pulsar_qwen35_conv_batch(out: *mut c_void, x: *const c_void, kern: *const c_void, state: *mut c_void, n_chan: u32, k: u32, n_tok: u32) -> i32;
-        fn pulsar_qwen35_gdn_batch(out: *mut c_void, state: *mut c_void, q: *const c_void, k: *const c_void, v: *const c_void, g: *const c_void, beta: *const c_void, h_v: u32, h_k: u32, dim: u32, n_tok: u32) -> i32;
+        fn pulsar_rope_yarn_partial(
+            x: *mut c_void,
+            n_tok: u32,
+            n_head: u32,
+            head_dim: u32,
+            rot_dim: u32,
+            pos0: u32,
+            freq_base: f32,
+            freq_scale: f32,
+            ext_factor: f32,
+            attn_factor: f32,
+            beta_fast: f32,
+            beta_slow: f32,
+            n_ctx_orig: u32,
+        ) -> i32;
+        fn pulsar_qwen35_conv_batch(
+            out: *mut c_void,
+            x: *const c_void,
+            kern: *const c_void,
+            state: *mut c_void,
+            n_chan: u32,
+            k: u32,
+            n_tok: u32,
+        ) -> i32;
+        fn pulsar_qwen35_gdn_batch(
+            out: *mut c_void,
+            state: *mut c_void,
+            q: *const c_void,
+            k: *const c_void,
+            v: *const c_void,
+            g: *const c_void,
+            beta: *const c_void,
+            h_v: u32,
+            h_k: u32,
+            dim: u32,
+            n_tok: u32,
+        ) -> i32;
         fn pulsar_qwen35_row_scale(x: *mut c_void, s: *const c_void, n_rows: u32, dim: u32) -> i32;
-        fn pulsar_qwen35_draft_attn(out: *mut c_void, q: *const c_void, k: *const c_void, v: *const c_void, n_q: u32, n_kv: u32, n_head: u32, n_kv_head: u32, dim: u32, scale: f32) -> i32;
-        fn pulsar_qwen35_rope_yarn(x: *mut c_void, n_tok: u32, n_head: u32, head_dim: u32, pos0: u32, freq_base: f32, freq_scale: f32, ext_factor: f32, attn_factor: f32, beta_fast: f32, beta_slow: f32, n_ctx_orig: u32) -> i32;
-        fn pulsar_qwen35_split_qkv(q: *mut c_void, k: *mut c_void, v: *mut c_void, x: *const c_void, n_tok: u32, key_dim: u32, value_dim: u32) -> i32;
-        fn pulsar_qwen35_ring_scatter(ring: *mut c_void, src: *const c_void, pos: u32, cap: u32, n_rows: u32, row_elems: u32, ring_stride: u32, ring_off: u32) -> i32;
-        fn pulsar_qwen35_ring_gather(dst: *mut c_void, ring: *const c_void, start: u32, cap: u32, n_rows: u32, row_elems: u32) -> i32;
-        fn pulsar_qwen35_gdn_coeffs(g_alpha: *mut c_void, beta: *mut c_void, a: *const c_void, dt: *const c_void, n_tok: u32, n_head: u32) -> i32;
-        fn pulsar_qwen35_row_sigmoid_scale(x: *mut c_void, s: *const c_void, n_rows: u32, dim: u32) -> i32;
+        fn pulsar_qwen35_draft_attn(
+            out: *mut c_void,
+            q: *const c_void,
+            k: *const c_void,
+            v: *const c_void,
+            n_q: u32,
+            n_kv: u32,
+            n_head: u32,
+            n_kv_head: u32,
+            dim: u32,
+            scale: f32,
+        ) -> i32;
+        fn pulsar_qwen35_rope_yarn(
+            x: *mut c_void,
+            n_tok: u32,
+            n_head: u32,
+            head_dim: u32,
+            pos0: u32,
+            freq_base: f32,
+            freq_scale: f32,
+            ext_factor: f32,
+            attn_factor: f32,
+            beta_fast: f32,
+            beta_slow: f32,
+            n_ctx_orig: u32,
+        ) -> i32;
+        fn pulsar_qwen35_split_qkv(
+            q: *mut c_void,
+            k: *mut c_void,
+            v: *mut c_void,
+            x: *const c_void,
+            n_tok: u32,
+            key_dim: u32,
+            value_dim: u32,
+        ) -> i32;
+        fn pulsar_qwen35_ring_scatter(
+            ring: *mut c_void,
+            src: *const c_void,
+            pos: u32,
+            cap: u32,
+            n_rows: u32,
+            row_elems: u32,
+            ring_stride: u32,
+            ring_off: u32,
+        ) -> i32;
+        fn pulsar_qwen35_ring_gather(
+            dst: *mut c_void,
+            ring: *const c_void,
+            start: u32,
+            cap: u32,
+            n_rows: u32,
+            row_elems: u32,
+        ) -> i32;
+        fn pulsar_qwen35_gdn_coeffs(
+            g_alpha: *mut c_void,
+            beta: *mut c_void,
+            a: *const c_void,
+            dt: *const c_void,
+            n_tok: u32,
+            n_head: u32,
+        ) -> i32;
+        fn pulsar_qwen35_row_sigmoid_scale(
+            x: *mut c_void,
+            s: *const c_void,
+            n_rows: u32,
+            dim: u32,
+        ) -> i32;
         fn pulsar_qwen35_selftest() -> i32;
         #[allow(clippy::too_many_arguments)]
-        fn pulsar_k3_kda_coeffs(g: *mut c_void, beta: *mut c_void, a: *const c_void, dt: *const c_void, n_tok: u32, n_head: u32, head_dim: u32, g_min: f32) -> i32;
-        fn pulsar_k3_kda_step(out: *mut c_void, state: *mut c_void, q: *const c_void, k: *const c_void, v: *const c_void, g: *const c_void, beta: *const c_void, n_head: u32, dim: u32) -> i32;
-        fn pulsar_k3_attn_res(out: *mut c_void, cur: *const c_void, ckpt: *const c_void, w: *const c_void, n_tok: u32, n_embd: u32, n_ckpt: u32, eps: f32) -> i32;
+        fn pulsar_k3_kda_coeffs(
+            g: *mut c_void,
+            beta: *mut c_void,
+            a: *const c_void,
+            dt: *const c_void,
+            n_tok: u32,
+            n_head: u32,
+            head_dim: u32,
+            g_min: f32,
+        ) -> i32;
+        fn pulsar_k3_kda_step(
+            out: *mut c_void,
+            state: *mut c_void,
+            q: *const c_void,
+            k: *const c_void,
+            v: *const c_void,
+            g: *const c_void,
+            beta: *const c_void,
+            n_head: u32,
+            dim: u32,
+        ) -> i32;
+        fn pulsar_k3_attn_res(
+            out: *mut c_void,
+            cur: *const c_void,
+            ckpt: *const c_void,
+            w: *const c_void,
+            n_tok: u32,
+            n_embd: u32,
+            n_ckpt: u32,
+            eps: f32,
+        ) -> i32;
+        fn pulsar_bailing_router_select(
+            selected: *mut c_void,
+            weights: *mut c_void,
+            logits: *const c_void,
+            bias: *const c_void,
+            n_expert: u32,
+            k_used: u32,
+            n_groups: u32,
+            n_group_used: u32,
+            weight_scale: f32,
+            n_tok: u32,
+        ) -> i32;
         fn pulsar_k3_selftest() -> i32;
-        fn pulsar_mla_kv_lora_rms_norm(out: *mut c_void, kv_raw: *const c_void, w: *const c_void, n_tok: u32, kv_raw_dim: u32, kv_lora_dim: u32, eps: f32) -> i32;
-        fn pulsar_mla_store_compact_kv(kv_lora_cache: *mut c_void, k_rope_cache: *mut c_void, kv_norm: *const c_void, kv_raw: *const c_void, pos0: u32, n_tok: u32, cache_cap: u32, kv_raw_dim: u32, kv_lora_dim: u32, qk_rope: u32, kvq: u32) -> i32;
-        fn pulsar_mla_fill_selected_range(selected: *mut c_void, n_tok: u32, pos0: u32, n_selected: u32, pad_row: u32) -> i32;
-        fn pulsar_mla_qk_lowrank(qk_low: *mut c_void, q: *const c_void, k_b: *const c_void, n_tok: u32, n_head: u32, kv_lora_dim: u32, qk_nope: u32, qk_dim: u32) -> i32;
-        fn pulsar_mla_attention(heads: *mut c_void, q: *const c_void, qk_low: *const c_void, kv_lora_cache: *const c_void, k_rope_cache: *const c_void, v_b: *const c_void, selected: *const c_void, n_tok: u32, n_selected: u32, cache_cap: u32, n_head: u32, kv_lora_dim: u32, qk_nope: u32, qk_rope: u32, value_dim: u32, n_ctx_orig: u32, freq_base: f32, freq_scale: f32, ext_factor: f32, attn_factor: f32, beta_fast: f32, beta_slow: f32, kq_mult: f32, kvq: u32) -> i32;
+        fn pulsar_mla_kv_lora_rms_norm(
+            out: *mut c_void,
+            kv_raw: *const c_void,
+            w: *const c_void,
+            n_tok: u32,
+            kv_raw_dim: u32,
+            kv_lora_dim: u32,
+            eps: f32,
+        ) -> i32;
+        fn pulsar_mla_store_compact_kv(
+            kv_lora_cache: *mut c_void,
+            k_rope_cache: *mut c_void,
+            kv_norm: *const c_void,
+            kv_raw: *const c_void,
+            pos0: u32,
+            n_tok: u32,
+            cache_cap: u32,
+            kv_raw_dim: u32,
+            kv_lora_dim: u32,
+            qk_rope: u32,
+            kvq: u32,
+        ) -> i32;
+        fn pulsar_mla_fill_selected_range(
+            selected: *mut c_void,
+            n_tok: u32,
+            pos0: u32,
+            n_selected: u32,
+            pad_row: u32,
+        ) -> i32;
+        fn pulsar_mla_qk_lowrank(
+            qk_low: *mut c_void,
+            q: *const c_void,
+            k_b: *const c_void,
+            n_tok: u32,
+            n_head: u32,
+            kv_lora_dim: u32,
+            qk_nope: u32,
+            qk_dim: u32,
+        ) -> i32;
+        fn pulsar_mla_attention(
+            heads: *mut c_void,
+            q: *const c_void,
+            qk_low: *const c_void,
+            kv_lora_cache: *const c_void,
+            k_rope_cache: *const c_void,
+            v_b: *const c_void,
+            selected: *const c_void,
+            n_tok: u32,
+            n_selected: u32,
+            cache_cap: u32,
+            n_head: u32,
+            kv_lora_dim: u32,
+            qk_nope: u32,
+            qk_rope: u32,
+            value_dim: u32,
+            n_ctx_orig: u32,
+            freq_base: f32,
+            freq_scale: f32,
+            ext_factor: f32,
+            attn_factor: f32,
+            beta_fast: f32,
+            beta_slow: f32,
+            kq_mult: f32,
+            kvq: u32,
+        ) -> i32;
     }
 
     /// RoPE/YaRN configuration for the MLA family. GLM-5.2 ships
@@ -278,7 +870,9 @@ mod real {
         use std::sync::Once;
         static ONCE: Once = Once::new();
         ONCE.call_once(|| {
-            let pick = std::env::var("PULSAR_GPU").ok().and_then(|s| s.trim().parse::<i32>().ok());
+            let pick = std::env::var("PULSAR_GPU")
+                .ok()
+                .and_then(|s| s.trim().parse::<i32>().ok());
             let mut probed = 0.0;
             let dev = pick.unwrap_or_else(|| {
                 let mut n = 0;
@@ -347,7 +941,10 @@ mod real {
         set_device(dev)?;
         let mut host = std::ptr::null_mut();
         let mut dst = std::ptr::null_mut();
-        check_rt(unsafe { cudaHostAlloc(&mut host, MB64, 0) }, "probe host alloc")?;
+        check_rt(
+            unsafe { cudaHostAlloc(&mut host, MB64, 0) },
+            "probe host alloc",
+        )?;
         if let Err(e) = check_rt(unsafe { cudaMalloc(&mut dst, MB64) }, "probe dev alloc") {
             unsafe { cudaFreeHost(host) };
             set_device(cur)?;
@@ -393,7 +990,10 @@ mod real {
         let cur = get_device();
         set_device(dev)?;
         let (mut free, mut total) = (0usize, 0usize);
-        let r = check_rt(unsafe { cudaMemGetInfo(&mut free, &mut total) }, "cudaMemGetInfo");
+        let r = check_rt(
+            unsafe { cudaMemGetInfo(&mut free, &mut total) },
+            "cudaMemGetInfo",
+        );
         set_device(cur)?;
         r?;
         Ok((free, total))
@@ -404,7 +1004,11 @@ mod real {
             ensure_device();
             let mut ptr = std::ptr::null_mut();
             if std::env::var_os("PULSAR_VERBOSE").is_some() && bytes >= 16 << 20 {
-                eprintln!("pulsar: alloc {:.3} GB on device {}", bytes as f64 / 1e9, get_device());
+                eprintln!(
+                    "pulsar: alloc {:.3} GB on device {}",
+                    bytes as f64 / 1e9,
+                    get_device()
+                );
             }
             if let Err(e) = check_rt(unsafe { cudaMalloc(&mut ptr, bytes.max(1)) }, "cudaMalloc") {
                 eprintln!(
@@ -414,7 +1018,12 @@ mod real {
                 );
                 return Err(e);
             }
-            Ok(DeviceBuf { ptr, host: std::ptr::null_mut(), bytes, dev: get_device() })
+            Ok(DeviceBuf {
+                ptr,
+                host: std::ptr::null_mut(),
+                bytes,
+                dev: get_device(),
+            })
         }
 
         /// Mapped pinned host memory; `ptr()` is device-visible. With UVA
@@ -423,10 +1032,21 @@ mod real {
             ensure_device();
             const MAPPED: u32 = 2; // cudaHostAllocMapped
             let mut host = std::ptr::null_mut();
-            check_rt(unsafe { cudaHostAlloc(&mut host, bytes.max(1), MAPPED) }, "cudaHostAlloc")?;
+            check_rt(
+                unsafe { cudaHostAlloc(&mut host, bytes.max(1), MAPPED) },
+                "cudaHostAlloc",
+            )?;
             let mut dev = std::ptr::null_mut();
-            check_rt(unsafe { cudaHostGetDevicePointer(&mut dev, host, 0) }, "cudaHostGetDevicePointer")?;
-            Ok(DeviceBuf { ptr: dev, host, bytes, dev: -1 })
+            check_rt(
+                unsafe { cudaHostGetDevicePointer(&mut dev, host, 0) },
+                "cudaHostGetDevicePointer",
+            )?;
+            Ok(DeviceBuf {
+                ptr: dev,
+                host,
+                bytes,
+                dev: -1,
+            })
         }
 
         pub fn from_bytes(data: &[u8]) -> Result<Self> {
@@ -542,29 +1162,41 @@ mod real {
     /// Plain-function pinned allocator pair for injection into CUDA-free
     /// crates (fetch buffers that later feed cudaMemcpy). cudaHostAlloc
     /// costs milliseconds of page-pinning per call, so freed buffers are
-    /// recycled through a size-keyed pool: at steady state (cache evicting
-    /// as fast as it fills) no pinning syscalls happen at all. Returns
-    /// null on failure so callers fall back to pageable memory.
-    fn pinned_pool() -> &'static std::sync::Mutex<std::collections::HashMap<usize, Vec<usize>>> {
-        static POOL: std::sync::OnceLock<
-            std::sync::Mutex<std::collections::HashMap<usize, Vec<usize>>>,
-        > = std::sync::OnceLock::new();
-        POOL.get_or_init(Default::default)
+    /// recycled through a size-keyed pool. Both live pinned allocations and
+    /// the recycle pool are bounded: a host cache must not turn a PCIe
+    /// optimization into an unbounded RAM reservation.
+    const PINNED_ALLOC_MAX_BYTES: usize = 4 * 1024 * 1024 * 1024;
+    const PINNED_POOL_MAX_BYTES: usize = 256 * 1024 * 1024;
+
+    #[derive(Default)]
+    struct PinnedPool {
+        free: std::collections::HashMap<usize, Vec<usize>>,
+        pooled_bytes: usize,
+        pinned_bytes: usize,
+    }
+
+    fn pinned_pool() -> &'static std::sync::Mutex<PinnedPool> {
+        static POOL: std::sync::LazyLock<std::sync::Mutex<PinnedPool>> =
+            std::sync::LazyLock::new(|| std::sync::Mutex::new(PinnedPool::default()));
+        &POOL
     }
 
     pub fn pinned_alloc(bytes: usize) -> *mut u8 {
         ensure_device();
-        if let Some(ptr) = pinned_pool()
+        let mut pool = pinned_pool()
             .lock()
-            .unwrap()
-            .get_mut(&bytes)
-            .and_then(Vec::pop)
-        {
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some(ptr) = pool.free.get_mut(&bytes).and_then(Vec::pop) {
+            pool.pooled_bytes = pool.pooled_bytes.saturating_sub(bytes);
             return ptr as *mut u8;
+        }
+        if bytes > PINNED_ALLOC_MAX_BYTES.saturating_sub(pool.pinned_bytes) {
+            return std::ptr::null_mut();
         }
         let mut host = std::ptr::null_mut();
         let rc = unsafe { cudaHostAlloc(&mut host, bytes.max(1), 0) };
         if rc == 0 {
+            pool.pinned_bytes += bytes;
             host as *mut u8
         } else {
             std::ptr::null_mut()
@@ -572,12 +1204,22 @@ mod real {
     }
 
     pub fn pinned_free(ptr: *mut u8, bytes: usize) {
-        pinned_pool()
-            .lock()
-            .unwrap()
-            .entry(bytes)
-            .or_default()
-            .push(ptr as usize);
+        let cached = {
+            let mut pool = pinned_pool()
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            if bytes <= PINNED_POOL_MAX_BYTES.saturating_sub(pool.pooled_bytes) {
+                pool.free.entry(bytes).or_default().push(ptr as usize);
+                pool.pooled_bytes += bytes;
+                true
+            } else {
+                pool.pinned_bytes = pool.pinned_bytes.saturating_sub(bytes);
+                false
+            }
+        };
+        if !cached {
+            unsafe { cudaFreeHost(ptr as *mut c_void) };
+        }
     }
 
     pub fn as_bytes<T: Copy>(v: &[T]) -> &[u8] {
@@ -597,7 +1239,11 @@ mod real {
     extern "C" {
         fn cudaStreamBeginCapture(stream: *mut c_void, mode: u32) -> i32;
         fn cudaStreamEndCapture(stream: *mut c_void, graph: *mut *mut c_void) -> i32;
-        fn cudaGraphInstantiateWithFlags(exec: *mut *mut c_void, graph: *mut c_void, flags: u64) -> i32;
+        fn cudaGraphInstantiateWithFlags(
+            exec: *mut *mut c_void,
+            graph: *mut c_void,
+            flags: u64,
+        ) -> i32;
         fn cudaGraphLaunch(exec: *mut c_void, stream: *mut c_void) -> i32;
         fn cudaGraphDestroy(graph: *mut c_void) -> i32;
         fn cudaGraphExecDestroy(exec: *mut c_void) -> i32;
@@ -650,7 +1296,10 @@ mod real {
 
         /// Replay the recorded chain on this thread's default stream.
         pub fn launch(&self) -> Result {
-            check_rt(unsafe { cudaGraphLaunch(self.exec, STREAM_PER_THREAD) }, "graph launch")
+            check_rt(
+                unsafe { cudaGraphLaunch(self.exec, STREAM_PER_THREAD) },
+                "graph launch",
+            )
         }
     }
 
@@ -662,7 +1311,13 @@ mod real {
 
     extern "C" {
         fn cudaStreamCreateWithFlags(s: *mut *mut c_void, flags: u32) -> i32;
-        fn cudaMemcpyAsync(dst: *mut c_void, src: *const c_void, bytes: usize, kind: i32, stream: *mut c_void) -> i32;
+        fn cudaMemcpyAsync(
+            dst: *mut c_void,
+            src: *const c_void,
+            bytes: usize,
+            kind: i32,
+            stream: *mut c_void,
+        ) -> i32;
         fn cudaEventCreateWithFlags(e: *mut *mut c_void, flags: u32) -> i32;
         fn cudaEventRecord(e: *mut c_void, stream: *mut c_void) -> i32;
         fn cudaEventQuery(e: *mut c_void) -> i32;
@@ -686,12 +1341,25 @@ mod real {
             const NON_BLOCKING: u32 = 1;
             const DISABLE_TIMING: u32 = 2;
             let mut stream = std::ptr::null_mut();
-            check_rt(unsafe { cudaStreamCreateWithFlags(&mut stream, NON_BLOCKING) }, "stream create")?;
+            check_rt(
+                unsafe { cudaStreamCreateWithFlags(&mut stream, NON_BLOCKING) },
+                "stream create",
+            )?;
             let mut event = std::ptr::null_mut();
-            check_rt(unsafe { cudaEventCreateWithFlags(&mut event, DISABLE_TIMING) }, "event create")?;
+            check_rt(
+                unsafe { cudaEventCreateWithFlags(&mut event, DISABLE_TIMING) },
+                "event create",
+            )?;
             let mut gate = std::ptr::null_mut();
-            check_rt(unsafe { cudaEventCreateWithFlags(&mut gate, DISABLE_TIMING) }, "gate create")?;
-            Ok(CopyStream { stream, event, gate })
+            check_rt(
+                unsafe { cudaEventCreateWithFlags(&mut gate, DISABLE_TIMING) },
+                "gate create",
+            )?;
+            Ok(CopyStream {
+                stream,
+                event,
+                gate,
+            })
         }
 
         /// Make queued-after copies wait for all compute-stream work
@@ -701,13 +1369,24 @@ mod real {
         /// CUDA's legacy stream, a different stream with no ordering edge to
         /// the launched kernels. Use the same per-thread stream explicitly.
         pub fn gate_behind_default(&self) -> Result {
-            check_rt(unsafe { cudaEventRecord(self.gate, STREAM_PER_THREAD) }, "gate record")?;
-            check_rt(unsafe { cudaStreamWaitEvent(self.stream, self.gate, 0) }, "gate wait")
+            check_rt(
+                unsafe { cudaEventRecord(self.gate, STREAM_PER_THREAD) },
+                "gate record",
+            )?;
+            check_rt(
+                unsafe { cudaStreamWaitEvent(self.stream, self.gate, 0) },
+                "gate wait",
+            )
         }
 
         /// Queue an async H2D copy of a whole pinned buffer into `dst` at
         /// `dst_off`. Record the event after the LAST copy of a batch.
-        pub fn copy_from_pinned(&self, dst: &mut DeviceBuf, dst_off: usize, src: &DeviceBuf) -> Result {
+        pub fn copy_from_pinned(
+            &self,
+            dst: &mut DeviceBuf,
+            dst_off: usize,
+            src: &DeviceBuf,
+        ) -> Result {
             assert!(!src.host.is_null(), "source must be pinned");
             assert!(dst_off + src.bytes <= dst.bytes);
             check_rt(
@@ -753,7 +1432,10 @@ mod real {
         }
 
         pub fn record(&self) -> Result {
-            check_rt(unsafe { cudaEventRecord(self.event, self.stream) }, "event record")
+            check_rt(
+                unsafe { cudaEventRecord(self.event, self.stream) },
+                "event record",
+            )
         }
 
         /// True once every copy queued before the last `record` finished.
@@ -777,7 +1459,10 @@ mod real {
             extern "C" {
                 fn cudaEventSynchronize(e: *mut c_void) -> i32;
             }
-            check_rt(unsafe { cudaEventSynchronize(self.event) }, "event synchronize")
+            check_rt(
+                unsafe { cudaEventSynchronize(self.event) },
+                "event synchronize",
+            )
         }
     }
 
@@ -797,7 +1482,13 @@ mod real {
     }
 
     /// Device-to-device copy between buffers (byte offsets).
-    pub fn copy_d2d(dst: &mut DeviceBuf, dst_off: usize, src: &DeviceBuf, src_off: usize, bytes: usize) -> Result {
+    pub fn copy_d2d(
+        dst: &mut DeviceBuf,
+        dst_off: usize,
+        src: &DeviceBuf,
+        src_off: usize,
+        bytes: usize,
+    ) -> Result {
         assert!(dst_off + bytes <= dst.bytes() && src_off + bytes <= src.bytes());
         check_rt(
             unsafe {
@@ -812,8 +1503,20 @@ mod real {
         )
     }
 
-    pub fn embed_q8_0(out: &mut DeviceBuf, w: &DeviceBuf, tokens: &DeviceBuf, n_embd: u32, n_vocab: u32, n_tok: u32) -> Result {
-        check(unsafe { pulsar_embed_q8_0(out.ptr_mut(), w.ptr(), tokens.ptr(), n_embd, n_vocab, n_tok) }, "embed_q8_0")
+    pub fn embed_q8_0(
+        out: &mut DeviceBuf,
+        w: &DeviceBuf,
+        tokens: &DeviceBuf,
+        n_embd: u32,
+        n_vocab: u32,
+        n_tok: u32,
+    ) -> Result {
+        check(
+            unsafe {
+                pulsar_embed_q8_0(out.ptr_mut(), w.ptr(), tokens.ptr(), n_embd, n_vocab, n_tok)
+            },
+            "embed_q8_0",
+        )
     }
 
     /// DSpark fused markov argmax over one logits row: returns
@@ -848,31 +1551,91 @@ mod real {
         Ok(id[0].max(0) as u32)
     }
 
-    pub fn rms_norm(out: &mut DeviceBuf, x: &DeviceBuf, w: &DeviceBuf, n: u32, rows: u32, eps: f32) -> Result {
-        check(unsafe { pulsar_rms_norm(out.ptr_mut(), x.ptr(), w.ptr(), n, rows, eps) }, "rms_norm")
+    pub fn rms_norm(
+        out: &mut DeviceBuf,
+        x: &DeviceBuf,
+        w: &DeviceBuf,
+        n: u32,
+        rows: u32,
+        eps: f32,
+    ) -> Result {
+        check(
+            unsafe { pulsar_rms_norm(out.ptr_mut(), x.ptr(), w.ptr(), n, rows, eps) },
+            "rms_norm",
+        )
     }
 
     /// In-place rms_norm (kernel reads each element before writing it).
-    pub fn rms_norm_inplace(x: &mut DeviceBuf, w: &DeviceBuf, n: u32, rows: u32, eps: f32) -> Result {
-        check(unsafe { pulsar_rms_norm(x.ptr_mut(), x.ptr(), w.ptr(), n, rows, eps) }, "rms_norm")
+    pub fn rms_norm_inplace(
+        x: &mut DeviceBuf,
+        w: &DeviceBuf,
+        n: u32,
+        rows: u32,
+        eps: f32,
+    ) -> Result {
+        check(
+            unsafe { pulsar_rms_norm(x.ptr_mut(), x.ptr(), w.ptr(), n, rows, eps) },
+            "rms_norm",
+        )
     }
 
-    pub fn matmul_q8_0(out: &mut DeviceBuf, w: &DeviceBuf, x: &DeviceBuf, in_dim: u32, out_dim: u32, n_tok: u32) -> Result {
-        check(unsafe { pulsar_q8_0_matmul(out.ptr_mut(), w.ptr(), x.ptr(), in_dim, out_dim, n_tok) }, "matmul_q8_0")
+    pub fn matmul_q8_0(
+        out: &mut DeviceBuf,
+        w: &DeviceBuf,
+        x: &DeviceBuf,
+        in_dim: u32,
+        out_dim: u32,
+        n_tok: u32,
+    ) -> Result {
+        check(
+            unsafe { pulsar_q8_0_matmul(out.ptr_mut(), w.ptr(), x.ptr(), in_dim, out_dim, n_tok) },
+            "matmul_q8_0",
+        )
     }
 
     /// Banked matmul: x is n_tok*n_bank contiguous pseudo-rows of in_dim,
     /// w is n_bank stacked [out_dim x in_dim] q8_0 matrices, pseudo-row j
     /// multiplies bank j % n_bank (deepseek4's grouped output projection
     /// in ONE launch, bitwise identical to the per-bank loop).
-    pub fn matmul_q8_0_banked(out: &mut DeviceBuf, w: &DeviceBuf, x: &DeviceBuf, in_dim: u32, out_dim: u32, n_bank: u32, n_tok: u32) -> Result {
-        check(unsafe { pulsar_q8_0_matmul_banked(out.ptr_mut(), w.ptr(), x.ptr(), in_dim, out_dim, n_bank, n_tok) }, "matmul_q8_0_banked")
+    pub fn matmul_q8_0_banked(
+        out: &mut DeviceBuf,
+        w: &DeviceBuf,
+        x: &DeviceBuf,
+        in_dim: u32,
+        out_dim: u32,
+        n_bank: u32,
+        n_tok: u32,
+    ) -> Result {
+        check(
+            unsafe {
+                pulsar_q8_0_matmul_banked(
+                    out.ptr_mut(),
+                    w.ptr(),
+                    x.ptr(),
+                    in_dim,
+                    out_dim,
+                    n_bank,
+                    n_tok,
+                )
+            },
+            "matmul_q8_0_banked",
+        )
     }
 
     /// matmul_q8_0 with byte offsets into each buffer (deepseek4's
     /// grouped output projection launches one bank per offset triple).
     #[allow(clippy::too_many_arguments)]
-    pub fn matmul_q8_0_off(out: &mut DeviceBuf, out_off: usize, w: &DeviceBuf, w_off: usize, x: &DeviceBuf, x_off: usize, in_dim: u32, out_dim: u32, n_tok: u32) -> Result {
+    pub fn matmul_q8_0_off(
+        out: &mut DeviceBuf,
+        out_off: usize,
+        w: &DeviceBuf,
+        w_off: usize,
+        x: &DeviceBuf,
+        x_off: usize,
+        in_dim: u32,
+        out_dim: u32,
+        n_tok: u32,
+    ) -> Result {
         debug_assert!(out_off < out.bytes() && w_off < w.bytes() && x_off < x.bytes());
         check(
             unsafe {
@@ -880,7 +1643,9 @@ mod real {
                     (out.ptr_mut() as *mut u8).add(out_off) as *mut c_void,
                     (w.ptr() as *const u8).add(w_off) as *const c_void,
                     (x.ptr() as *const u8).add(x_off) as *const c_void,
-                    in_dim, out_dim, n_tok,
+                    in_dim,
+                    out_dim,
+                    n_tok,
                 )
             },
             "matmul_q8_0_off",
@@ -890,40 +1655,204 @@ mod real {
     /// Dense matmul over a K-quant weight matrix; `xq` holds q8_K-quantized
     /// activations (quantize_q8_k) - the lm-head path for K-quant ggufs.
     #[allow(clippy::too_many_arguments)]
-    pub fn matmul_kq(out: &mut DeviceBuf, w: &DeviceBuf, xq: &DeviceBuf, in_dim: u32, out_dim: u32, n_tok: u32, row_bytes: u64, quant: u32) -> Result {
-        check(unsafe { pulsar_matmul_kq(out.ptr_mut(), w.ptr(), xq.ptr(), in_dim, out_dim, n_tok, row_bytes, quant) }, "matmul_kq")
+    pub fn matmul_kq(
+        out: &mut DeviceBuf,
+        w: &DeviceBuf,
+        xq: &DeviceBuf,
+        in_dim: u32,
+        out_dim: u32,
+        n_tok: u32,
+        row_bytes: u64,
+        quant: u32,
+    ) -> Result {
+        check(
+            unsafe {
+                pulsar_matmul_kq(
+                    out.ptr_mut(),
+                    w.ptr(),
+                    xq.ptr(),
+                    in_dim,
+                    out_dim,
+                    n_tok,
+                    row_bytes,
+                    quant,
+                )
+            },
+            "matmul_kq",
+        )
     }
 
     /// DSA indexer wrappers (GLM-5.2 lightning indexer).
     #[allow(clippy::too_many_arguments)]
-    pub fn idx_rope0(x: &mut DeviceBuf, n_tok: u32, n_head: u32, head_dim: u32, rot_dim: u32, pos0: u32, r: &RopeCfg, ext_factor: f32, attn_factor: f32) -> Result {
-        check(unsafe { pulsar_idx_rope0(x.ptr_mut(), n_tok, n_head, head_dim, rot_dim, pos0, r.n_ctx_orig, r.freq_base, r.freq_scale, ext_factor, attn_factor, r.beta_fast, r.beta_slow) }, "idx_rope0")
+    pub fn idx_rope0(
+        x: &mut DeviceBuf,
+        n_tok: u32,
+        n_head: u32,
+        head_dim: u32,
+        rot_dim: u32,
+        pos0: u32,
+        r: &RopeCfg,
+        ext_factor: f32,
+        attn_factor: f32,
+    ) -> Result {
+        check(
+            unsafe {
+                pulsar_idx_rope0(
+                    x.ptr_mut(),
+                    n_tok,
+                    n_head,
+                    head_dim,
+                    rot_dim,
+                    pos0,
+                    r.n_ctx_orig,
+                    r.freq_base,
+                    r.freq_scale,
+                    ext_factor,
+                    attn_factor,
+                    r.beta_fast,
+                    r.beta_slow,
+                )
+            },
+            "idx_rope0",
+        )
     }
 
     #[allow(clippy::too_many_arguments)]
-    pub fn idx_store_k(raw_k: &DeviceBuf, w: &DeviceBuf, b: &DeviceBuf, cache: &mut DeviceBuf, pos0: u32, n_tok: u32, cache_cap: u32, head_dim: u32, rot_dim: u32, eps: f32, r: &RopeCfg, ext_factor: f32, attn_factor: f32, fp8: u32) -> Result {
-        check(unsafe { pulsar_idx_store_k(raw_k.ptr(), w.ptr(), b.ptr(), cache.ptr_mut(), pos0, n_tok, cache_cap, head_dim, rot_dim, r.n_ctx_orig, eps, r.freq_base, r.freq_scale, ext_factor, attn_factor, r.beta_fast, r.beta_slow, fp8) }, "idx_store_k")
+    pub fn idx_store_k(
+        raw_k: &DeviceBuf,
+        w: &DeviceBuf,
+        b: &DeviceBuf,
+        cache: &mut DeviceBuf,
+        pos0: u32,
+        n_tok: u32,
+        cache_cap: u32,
+        head_dim: u32,
+        rot_dim: u32,
+        eps: f32,
+        r: &RopeCfg,
+        ext_factor: f32,
+        attn_factor: f32,
+        fp8: u32,
+    ) -> Result {
+        check(
+            unsafe {
+                pulsar_idx_store_k(
+                    raw_k.ptr(),
+                    w.ptr(),
+                    b.ptr(),
+                    cache.ptr_mut(),
+                    pos0,
+                    n_tok,
+                    cache_cap,
+                    head_dim,
+                    rot_dim,
+                    r.n_ctx_orig,
+                    eps,
+                    r.freq_base,
+                    r.freq_scale,
+                    ext_factor,
+                    attn_factor,
+                    r.beta_fast,
+                    r.beta_slow,
+                    fp8,
+                )
+            },
+            "idx_store_k",
+        )
     }
 
     #[allow(clippy::too_many_arguments)]
-    pub fn idx_score_one(scores: &mut DeviceBuf, q: &DeviceBuf, weights: &DeviceBuf, cache: &DeviceBuf, n_rows: u32, n_head: u32, head_dim: u32, scale: f32, fp8: u32) -> Result {
-        check(unsafe { pulsar_idx_score_one(scores.ptr_mut(), q.ptr(), weights.ptr(), cache.ptr(), n_rows, n_head, head_dim, scale, fp8) }, "idx_score_one")
+    pub fn idx_score_one(
+        scores: &mut DeviceBuf,
+        q: &DeviceBuf,
+        weights: &DeviceBuf,
+        cache: &DeviceBuf,
+        n_rows: u32,
+        n_head: u32,
+        head_dim: u32,
+        scale: f32,
+        fp8: u32,
+    ) -> Result {
+        check(
+            unsafe {
+                pulsar_idx_score_one(
+                    scores.ptr_mut(),
+                    q.ptr(),
+                    weights.ptr(),
+                    cache.ptr(),
+                    n_rows,
+                    n_head,
+                    head_dim,
+                    scale,
+                    fp8,
+                )
+            },
+            "idx_score_one",
+        )
     }
 
     /// dsv4 indexer scores: f32 cache rows (QAT'd + f16-rounded), query
     /// already rope+QAT'd on the host. Score math mirrors the host
     /// indexer_allowed exactly (per-head block reduce, max(0,dot)*w*scale).
-    pub fn dsv4_idx_scores_one(scores: &mut DeviceBuf, q: &DeviceBuf, weights: &DeviceBuf, cache: &DeviceBuf, n_rows: u32, n_head: u32, head_dim: u32, scale: f32) -> Result {
-        check(unsafe { pulsar_dsv4_idx_scores_one(scores.ptr_mut(), q.ptr(), weights.ptr(), cache.ptr(), n_rows, n_head, head_dim, scale) }, "dsv4_idx_scores_one")
+    pub fn dsv4_idx_scores_one(
+        scores: &mut DeviceBuf,
+        q: &DeviceBuf,
+        weights: &DeviceBuf,
+        cache: &DeviceBuf,
+        n_rows: u32,
+        n_head: u32,
+        head_dim: u32,
+        scale: f32,
+    ) -> Result {
+        check(
+            unsafe {
+                pulsar_dsv4_idx_scores_one(
+                    scores.ptr_mut(),
+                    q.ptr(),
+                    weights.ptr(),
+                    cache.ptr(),
+                    n_rows,
+                    n_head,
+                    head_dim,
+                    scale,
+                )
+            },
+            "dsv4_idx_scores_one",
+        )
     }
 
     /// dsv4_idx_scores_one with byte offsets into q/weights (per-token
     /// slices of the chunked prefill buffers).
     #[allow(clippy::too_many_arguments)]
-    pub fn dsv4_idx_scores_one_at(scores: &mut DeviceBuf, q: &DeviceBuf, q_off: usize, weights: &DeviceBuf, w_off: usize, cache: &DeviceBuf, n_rows: u32, n_head: u32, head_dim: u32, scale: f32) -> Result {
+    pub fn dsv4_idx_scores_one_at(
+        scores: &mut DeviceBuf,
+        q: &DeviceBuf,
+        q_off: usize,
+        weights: &DeviceBuf,
+        w_off: usize,
+        cache: &DeviceBuf,
+        n_rows: u32,
+        n_head: u32,
+        head_dim: u32,
+        scale: f32,
+    ) -> Result {
         let q_ptr = unsafe { (q.ptr() as *const u8).add(q_off) as *const c_void };
         let w_ptr = unsafe { (weights.ptr() as *const u8).add(w_off) as *const c_void };
-        check(unsafe { pulsar_dsv4_idx_scores_one(scores.ptr_mut(), q_ptr, w_ptr, cache.ptr(), n_rows, n_head, head_dim, scale) }, "dsv4_idx_scores_one_at")
+        check(
+            unsafe {
+                pulsar_dsv4_idx_scores_one(
+                    scores.ptr_mut(),
+                    q_ptr,
+                    w_ptr,
+                    cache.ptr(),
+                    n_rows,
+                    n_head,
+                    head_dim,
+                    scale,
+                )
+            },
+            "dsv4_idx_scores_one_at",
+        )
     }
 
     /// Batched dsv4_idx_scores_one: scores_off is a byte offset into
@@ -931,35 +1860,119 @@ mod real {
     /// score kernels can be enqueued back-to-back and drained with ONE
     /// readback instead of one blocking D2H per token.
     #[allow(clippy::too_many_arguments)]
-    pub fn dsv4_idx_scores_one_batch_at(scores: &mut DeviceBuf, scores_off: usize, q: &DeviceBuf, q_off: usize, weights: &DeviceBuf, w_off: usize, cache: &DeviceBuf, n_rows: u32, n_head: u32, head_dim: u32, scale: f32) -> Result {
+    pub fn dsv4_idx_scores_one_batch_at(
+        scores: &mut DeviceBuf,
+        scores_off: usize,
+        q: &DeviceBuf,
+        q_off: usize,
+        weights: &DeviceBuf,
+        w_off: usize,
+        cache: &DeviceBuf,
+        n_rows: u32,
+        n_head: u32,
+        head_dim: u32,
+        scale: f32,
+    ) -> Result {
         let s_ptr = unsafe { (scores.ptr_mut() as *mut u8).add(scores_off) as *mut c_void };
         let q_ptr = unsafe { (q.ptr() as *const u8).add(q_off) as *const c_void };
         let w_ptr = unsafe { (weights.ptr() as *const u8).add(w_off) as *const c_void };
-        check(unsafe { pulsar_dsv4_idx_scores_one(s_ptr, q_ptr, w_ptr, cache.ptr(), n_rows, n_head, head_dim, scale) }, "dsv4_idx_scores_one_batch_at")
+        check(
+            unsafe {
+                pulsar_dsv4_idx_scores_one(
+                    s_ptr,
+                    q_ptr,
+                    w_ptr,
+                    cache.ptr(),
+                    n_rows,
+                    n_head,
+                    head_dim,
+                    scale,
+                )
+            },
+            "dsv4_idx_scores_one_batch_at",
+        )
     }
 
-    pub fn idx_topk(selected: &mut DeviceBuf, scores: &DeviceBuf, n_rows: u32, top_k: u32) -> Result {
-        check(unsafe { pulsar_idx_topk(selected.ptr_mut(), scores.ptr(), n_rows, top_k) }, "idx_topk")
+    pub fn idx_topk(
+        selected: &mut DeviceBuf,
+        scores: &DeviceBuf,
+        n_rows: u32,
+        top_k: u32,
+    ) -> Result {
+        check(
+            unsafe { pulsar_idx_topk(selected.ptr_mut(), scores.ptr(), n_rows, top_k) },
+            "idx_topk",
+        )
     }
 
     /// Per-token top-k over a batch score matrix: row list for token t
     /// lands at selected[t*top_k..]. One bitonic launch per token.
-    pub fn idx_topk_batch(selected: &mut DeviceBuf, scores: &DeviceBuf, n_rows: u32, n_tok: u32, top_k: u32) -> Result {
+    pub fn idx_topk_batch(
+        selected: &mut DeviceBuf,
+        scores: &DeviceBuf,
+        n_rows: u32,
+        n_tok: u32,
+        top_k: u32,
+    ) -> Result {
         for t in 0..n_tok as usize {
             let sel = unsafe { (selected.ptr_mut() as *mut u8).add(t * top_k as usize * 4) };
             let sc = unsafe { (scores.ptr() as *const u8).add(t * n_rows as usize * 4) };
-            check(unsafe { pulsar_idx_topk(sel as *mut c_void, sc as *const c_void, n_rows, top_k) }, "idx_topk_batch")?;
+            check(
+                unsafe { pulsar_idx_topk(sel as *mut c_void, sc as *const c_void, n_rows, top_k) },
+                "idx_topk_batch",
+            )?;
         }
         Ok(())
     }
 
     #[allow(clippy::too_many_arguments)]
-    pub fn idx_scores_batch(scores: &mut DeviceBuf, q: &DeviceBuf, weights: &DeviceBuf, cache: &DeviceBuf, q16: Option<&mut DeviceBuf>, n_rows: u32, n_tok: u32, pos0: u32, n_head: u32, head_dim: u32, scale: f32, fp8: u32) -> Result {
-        check(unsafe { pulsar_idx_scores_batch(scores.ptr_mut(), q.ptr(), weights.ptr(), cache.ptr(), q16.map_or(std::ptr::null_mut(), |b| b.ptr_mut()), n_rows, n_tok, pos0, n_head, head_dim, scale, fp8) }, "idx_scores_batch")
+    pub fn idx_scores_batch(
+        scores: &mut DeviceBuf,
+        q: &DeviceBuf,
+        weights: &DeviceBuf,
+        cache: &DeviceBuf,
+        q16: Option<&mut DeviceBuf>,
+        n_rows: u32,
+        n_tok: u32,
+        pos0: u32,
+        n_head: u32,
+        head_dim: u32,
+        scale: f32,
+        fp8: u32,
+    ) -> Result {
+        check(
+            unsafe {
+                pulsar_idx_scores_batch(
+                    scores.ptr_mut(),
+                    q.ptr(),
+                    weights.ptr(),
+                    cache.ptr(),
+                    q16.map_or(std::ptr::null_mut(), |b| b.ptr_mut()),
+                    n_rows,
+                    n_tok,
+                    pos0,
+                    n_head,
+                    head_dim,
+                    scale,
+                    fp8,
+                )
+            },
+            "idx_scores_batch",
+        )
     }
 
-    pub fn matmul_f32(out: &mut DeviceBuf, w: &DeviceBuf, x: &DeviceBuf, in_dim: u32, out_dim: u32, n_tok: u32) -> Result {
-        check(unsafe { pulsar_matmul_f32(out.ptr_mut(), w.ptr(), x.ptr(), in_dim, out_dim, n_tok) }, "matmul_f32")
+    pub fn matmul_f32(
+        out: &mut DeviceBuf,
+        w: &DeviceBuf,
+        x: &DeviceBuf,
+        in_dim: u32,
+        out_dim: u32,
+        n_tok: u32,
+    ) -> Result {
+        check(
+            unsafe { pulsar_matmul_f32(out.ptr_mut(), w.ptr(), x.ptr(), in_dim, out_dim, n_tok) },
+            "matmul_f32",
+        )
     }
 
     pub fn scale(x: &mut DeviceBuf, n: u32, c: f32) -> Result {
@@ -969,71 +1982,262 @@ mod real {
     /// Fill columns keep..row_w of each row with v (inkling padded-vocab
     /// logit poison).
     pub fn fill_row_tail(x: &mut DeviceBuf, rows: u32, row_w: u32, keep: u32, v: f32) -> Result {
-        check(unsafe { pulsar_fill_row_tail(x.ptr_mut(), rows, row_w, keep, v) }, "fill_row_tail")
+        check(
+            unsafe { pulsar_fill_row_tail(x.ptr_mut(), rows, row_w, keep, v) },
+            "fill_row_tail",
+        )
     }
 
     pub fn softcap(x: &mut DeviceBuf, n: u32, cap: f32) -> Result {
         check(unsafe { pulsar_softcap(x.ptr_mut(), n, cap) }, "softcap")
     }
 
-    pub fn router_scale_selected(w: &mut DeviceBuf, sel: &DeviceBuf, scale: &DeviceBuf, n: u32, n_expert: u32) -> Result {
-        check(unsafe { pulsar_router_scale_selected(w.ptr_mut(), sel.ptr(), scale.ptr(), n, n_expert) }, "router_scale_selected")
+    pub fn router_scale_selected(
+        w: &mut DeviceBuf,
+        sel: &DeviceBuf,
+        scale: &DeviceBuf,
+        n: u32,
+        n_expert: u32,
+    ) -> Result {
+        check(
+            unsafe {
+                pulsar_router_scale_selected(w.ptr_mut(), sel.ptr(), scale.ptr(), n, n_expert)
+            },
+            "router_scale_selected",
+        )
     }
 
     /// act_op: 0 = silu (swiglu), 1 = gelu tanh (Gemma)
-    pub fn swiglu(out: &mut DeviceBuf, gate: &DeviceBuf, up: &DeviceBuf, n: u32, clamp: f32, weight: f32, act_op: u32) -> Result {
-        check(unsafe { pulsar_swiglu(out.ptr_mut(), gate.ptr(), up.ptr(), n, clamp, weight, act_op) }, "swiglu")
+    pub fn swiglu(
+        out: &mut DeviceBuf,
+        gate: &DeviceBuf,
+        up: &DeviceBuf,
+        n: u32,
+        clamp: f32,
+        weight: f32,
+        act_op: u32,
+    ) -> Result {
+        check(
+            unsafe {
+                pulsar_swiglu(
+                    out.ptr_mut(),
+                    gate.ptr(),
+                    up.ptr(),
+                    n,
+                    clamp,
+                    weight,
+                    act_op,
+                )
+            },
+            "swiglu",
+        )
     }
 
     #[allow(clippy::too_many_arguments)]
-    pub fn moe_pair_swiglu_grouped(mid: &mut DeviceBuf, gptrs: &DeviceBuf, starts: &DeviceBuf, pairs: &DeviceBuf, weights: &DeviceBuf, xq: &DeviceBuf, in_dim: u32, mid_dim: u32, n_used: u32, n_group: u32, row_bytes: u64, quant: u32, act_op: u32) -> Result {
-        check(unsafe { pulsar_moe_pair_swiglu_grouped(mid.ptr_mut(), gptrs.ptr(), starts.ptr(), pairs.ptr(), weights.ptr(), xq.ptr(), in_dim, mid_dim, n_used, n_group, row_bytes, quant, act_op) }, "moe_pair_swiglu_grouped")
+    pub fn moe_pair_swiglu_grouped(
+        mid: &mut DeviceBuf,
+        gptrs: &DeviceBuf,
+        starts: &DeviceBuf,
+        pairs: &DeviceBuf,
+        weights: &DeviceBuf,
+        xq: &DeviceBuf,
+        in_dim: u32,
+        mid_dim: u32,
+        n_used: u32,
+        n_group: u32,
+        row_bytes: u64,
+        clamp: f32,
+        quant: u32,
+        act_op: u32,
+    ) -> Result {
+        check(
+            unsafe {
+                pulsar_moe_pair_swiglu_grouped(
+                    mid.ptr_mut(),
+                    gptrs.ptr(),
+                    starts.ptr(),
+                    pairs.ptr(),
+                    weights.ptr(),
+                    xq.ptr(),
+                    in_dim,
+                    mid_dim,
+                    n_used,
+                    n_group,
+                    row_bytes,
+                    clamp,
+                    quant,
+                    act_op,
+                )
+            },
+            "moe_pair_swiglu_grouped",
+        )
     }
 
     #[allow(clippy::too_many_arguments)]
-    pub fn moe_down_grouped(partial: &mut DeviceBuf, gptrs: &DeviceBuf, starts: &DeviceBuf, pairs: &DeviceBuf, midq: &DeviceBuf, mid_dim: u32, out_dim: u32, n_used: u32, n_group: u32, row_bytes: u64, quant: u32) -> Result {
-        check(unsafe { pulsar_moe_down_grouped(partial.ptr_mut(), gptrs.ptr(), starts.ptr(), pairs.ptr(), midq.ptr(), mid_dim, out_dim, n_used, n_group, row_bytes, quant) }, "moe_down_grouped")
+    pub fn moe_down_grouped(
+        partial: &mut DeviceBuf,
+        gptrs: &DeviceBuf,
+        starts: &DeviceBuf,
+        pairs: &DeviceBuf,
+        midq: &DeviceBuf,
+        mid_dim: u32,
+        out_dim: u32,
+        n_used: u32,
+        n_group: u32,
+        row_bytes: u64,
+        quant: u32,
+    ) -> Result {
+        check(
+            unsafe {
+                pulsar_moe_down_grouped(
+                    partial.ptr_mut(),
+                    gptrs.ptr(),
+                    starts.ptr(),
+                    pairs.ptr(),
+                    midq.ptr(),
+                    mid_dim,
+                    out_dim,
+                    n_used,
+                    n_group,
+                    row_bytes,
+                    quant,
+                )
+            },
+            "moe_down_grouped",
+        )
     }
 
     pub fn zero(buf: &mut DeviceBuf, bytes: usize) -> Result {
         check_rt(unsafe { cudaMemset(buf.ptr_mut(), 0, bytes) }, "cudaMemset")
     }
 
-    pub fn moe_slot_sum(out: &mut DeviceBuf, partial: &DeviceBuf, out_dim: u32, n_used: u32, n_tok: u32) -> Result {
-        check(unsafe { pulsar_moe_slot_sum(out.ptr_mut(), partial.ptr(), out_dim, n_used, n_tok) }, "moe_slot_sum")
+    pub fn moe_slot_sum(
+        out: &mut DeviceBuf,
+        partial: &DeviceBuf,
+        out_dim: u32,
+        n_used: u32,
+        n_tok: u32,
+    ) -> Result {
+        check(
+            unsafe { pulsar_moe_slot_sum(out.ptr_mut(), partial.ptr(), out_dim, n_used, n_tok) },
+            "moe_slot_sum",
+        )
     }
 
     /// Adds sum_s w_s * b_down_s to a finished down-projection output.
     /// No-op unless some expert carries a down bias; only gpt-oss does.
-    pub fn moe_down_bias(out: &mut DeviceBuf, ptrs: &DeviceBuf, weights: &DeviceBuf, out_dim: u32, n_used: u32, n_tok: u32) -> Result {
-        check(unsafe { pulsar_moe_down_bias(out.ptr_mut(), ptrs.ptr(), weights.ptr(), out_dim, n_used, n_tok) }, "moe_down_bias")
+    pub fn moe_down_bias(
+        out: &mut DeviceBuf,
+        ptrs: &DeviceBuf,
+        weights: &DeviceBuf,
+        out_dim: u32,
+        n_used: u32,
+        n_tok: u32,
+    ) -> Result {
+        check(
+            unsafe {
+                pulsar_moe_down_bias(
+                    out.ptr_mut(),
+                    ptrs.ptr(),
+                    weights.ptr(),
+                    out_dim,
+                    n_used,
+                    n_tok,
+                )
+            },
+            "moe_down_bias",
+        )
     }
 
     /// Adds a [dim] bias vector to each of `rows` rows, in place.
     pub fn add_bias_rows(x: &mut DeviceBuf, bias: &DeviceBuf, dim: u32, rows: u32) -> Result {
-        check(unsafe { pulsar_add_bias_rows(x.ptr_mut(), bias.ptr(), dim, rows) }, "add_bias_rows")
+        check(
+            unsafe { pulsar_add_bias_rows(x.ptr_mut(), bias.ptr(), dim, rows) },
+            "add_bias_rows",
+        )
     }
 
     pub fn add(out: &mut DeviceBuf, a: &DeviceBuf, b: &DeviceBuf, n: u32) -> Result {
-        check(unsafe { pulsar_add(out.ptr_mut(), a.ptr(), b.ptr(), n) }, "add")
+        check(
+            unsafe { pulsar_add(out.ptr_mut(), a.ptr(), b.ptr(), n) },
+            "add",
+        )
     }
 
     /// out += b (elementwise kernel; aliasing out as input is safe).
     pub fn add_assign(out: &mut DeviceBuf, b: &DeviceBuf, n: u32) -> Result {
         let o = out.ptr_mut();
-        check(unsafe { pulsar_add(o, o as *const c_void, b.ptr(), n) }, "add_assign")
+        check(
+            unsafe { pulsar_add(o, o as *const c_void, b.ptr(), n) },
+            "add_assign",
+        )
     }
 
     /// mode: 0 = sigmoid+bias (Hy3/GLM/M3), 1 = softmax (qwen3moe/gemma4),
     /// 2 = inkling sink (n_shexp shared experts append as slots k..k+n_shexp
     /// with logsigmoid-softmax weights; selected/weights hold k+n_shexp).
     #[allow(clippy::too_many_arguments)]
-    pub fn router_select(selected: &mut DeviceBuf, weights: &mut DeviceBuf, logits: &DeviceBuf, bias: &DeviceBuf, n_expert: u32, k_used: u32, weight_scale: f32, n_tok: u32, mode: u32, n_shexp: u32) -> Result {
+    pub fn router_select(
+        selected: &mut DeviceBuf,
+        weights: &mut DeviceBuf,
+        logits: &DeviceBuf,
+        bias: &DeviceBuf,
+        n_expert: u32,
+        k_used: u32,
+        weight_scale: f32,
+        n_tok: u32,
+        mode: u32,
+        n_shexp: u32,
+    ) -> Result {
         check(
             unsafe {
-                pulsar_router_select(selected.ptr_mut(), weights.ptr_mut(), logits.ptr(), bias.ptr(), n_expert, k_used, weight_scale, n_tok, mode, n_shexp)
+                pulsar_router_select(
+                    selected.ptr_mut(),
+                    weights.ptr_mut(),
+                    logits.ptr(),
+                    bias.ptr(),
+                    n_expert,
+                    k_used,
+                    weight_scale,
+                    n_tok,
+                    mode,
+                    n_shexp,
+                )
             },
             "router_select",
+        )
+    }
+    /// noaux_tc grouped sigmoid router (bailingmoe3): top n_group_used
+    /// groups by summed top-2 score, then top-k inside the survivors.
+    #[allow(clippy::too_many_arguments)]
+    pub fn bailing_router_select(
+        selected: &mut DeviceBuf,
+        weights: &mut DeviceBuf,
+        logits: &DeviceBuf,
+        bias: &DeviceBuf,
+        n_expert: u32,
+        k_used: u32,
+        n_groups: u32,
+        n_group_used: u32,
+        weight_scale: f32,
+        n_tok: u32,
+    ) -> Result {
+        check(
+            unsafe {
+                pulsar_bailing_router_select(
+                    selected.ptr_mut(),
+                    weights.ptr_mut(),
+                    logits.ptr(),
+                    bias.ptr(),
+                    n_expert,
+                    k_used,
+                    n_groups,
+                    n_group_used,
+                    weight_scale,
+                    n_tok,
+                )
+            },
+            "bailing_router_select",
         )
     }
 
@@ -1043,57 +2247,254 @@ mod real {
 
     /// Quantize f32 rows to q8_K (the activation side of the expert dots).
     pub fn quantize_q8_k(out: &mut DeviceBuf, x: &DeviceBuf, in_dim: u32, n_rows: u32) -> Result {
-        check(unsafe { pulsar_quantize_q8_K(out.ptr_mut(), x.ptr(), in_dim, n_rows) }, "quantize_q8_k")
+        check(
+            unsafe { pulsar_quantize_q8_K(out.ptr_mut(), x.ptr(), in_dim, n_rows) },
+            "quantize_q8_k",
+        )
     }
 
     #[allow(clippy::too_many_arguments)]
-    pub fn moe_pair_swiglu(mid: &mut DeviceBuf, ptrs: &DeviceBuf, weights: &DeviceBuf, x: &DeviceBuf, in_dim: u32, mid_dim: u32, n_used: u32, n_tok: u32, row_bytes: u64, quant: u32, act_op: u32) -> Result {
+    pub fn moe_pair_swiglu(
+        mid: &mut DeviceBuf,
+        ptrs: &DeviceBuf,
+        weights: &DeviceBuf,
+        x: &DeviceBuf,
+        in_dim: u32,
+        mid_dim: u32,
+        n_used: u32,
+        n_tok: u32,
+        row_bytes: u64,
+        clamp: f32,
+        quant: u32,
+        act_op: u32,
+    ) -> Result {
         check(
             unsafe {
-                pulsar_moe_pair_swiglu(mid.ptr_mut(), ptrs.ptr(), weights.ptr(), x.ptr(), in_dim, mid_dim, n_used, n_tok, row_bytes, quant, act_op)
+                pulsar_moe_pair_swiglu(
+                    mid.ptr_mut(),
+                    ptrs.ptr(),
+                    weights.ptr(),
+                    x.ptr(),
+                    in_dim,
+                    mid_dim,
+                    n_used,
+                    n_tok,
+                    row_bytes,
+                    clamp,
+                    quant,
+                    act_op,
+                )
             },
             "moe_pair_swiglu",
         )
     }
 
     #[allow(clippy::too_many_arguments)]
-    pub fn moe_down(out: &mut DeviceBuf, ptrs: &DeviceBuf, mid: &DeviceBuf, mid_dim: u32, out_dim: u32, n_used: u32, n_tok: u32, row_bytes: u64, quant: u32) -> Result {
+    pub fn moe_down(
+        out: &mut DeviceBuf,
+        ptrs: &DeviceBuf,
+        mid: &DeviceBuf,
+        mid_dim: u32,
+        out_dim: u32,
+        n_used: u32,
+        n_tok: u32,
+        row_bytes: u64,
+        quant: u32,
+        ext: Option<&DeviceBuf>,
+    ) -> Result {
         check(
             unsafe {
-                pulsar_moe_down(out.ptr_mut(), ptrs.ptr(), mid.ptr(), mid_dim, out_dim, n_used, n_tok, row_bytes, quant)
+                pulsar_moe_down(
+                    out.ptr_mut(),
+                    ptrs.ptr(),
+                    mid.ptr(),
+                    mid_dim,
+                    out_dim,
+                    n_used,
+                    n_tok,
+                    row_bytes,
+                    quant,
+                    ext.map_or(std::ptr::null(), |b| b.ptr()),
+                )
             },
             "moe_down",
         )
     }
 
-    pub fn gqa_head_rms_norm(x: &mut DeviceBuf, w: Option<&DeviceBuf>, rows: u32, head_dim: u32, eps: f32) -> Result {
-        check(unsafe { pulsar_gqa_head_rms_norm(x.ptr_mut(), w.map_or(std::ptr::null(), |b| b.ptr()), rows, head_dim, eps) }, "gqa_head_rms_norm")
+    /// Resident-tier half of the bit-exact MoE contract: one fully-reduced
+    /// down projection per (token, slot), unsummed - the primary splices
+    /// these into its canonical accumulation order via moe_down's `ext`.
+    #[allow(clippy::too_many_arguments)]
+    pub fn moe_down_per_slot(
+        out: &mut DeviceBuf,
+        ptrs: &DeviceBuf,
+        mid: &DeviceBuf,
+        mid_dim: u32,
+        out_dim: u32,
+        n_used: u32,
+        n_tok: u32,
+        row_bytes: u64,
+        quant: u32,
+    ) -> Result {
+        check(
+            unsafe {
+                pulsar_moe_down_per_slot(
+                    out.ptr_mut(),
+                    ptrs.ptr(),
+                    mid.ptr(),
+                    mid_dim,
+                    out_dim,
+                    n_used,
+                    n_tok,
+                    row_bytes,
+                    quant,
+                )
+            },
+            "moe_down_per_slot",
+        )
     }
 
-    pub fn gqa_rope(x: &mut DeviceBuf, n_tok: u32, n_head: u32, head_dim: u32, rot_dim: u32, pos0: u32, theta: f32, factors: Option<&DeviceBuf>) -> Result {
-        check(unsafe { pulsar_gqa_rope(x.ptr_mut(), n_tok, n_head, head_dim, rot_dim, pos0, theta, factors.map_or(std::ptr::null(), |b| b.ptr())) }, "gqa_rope")
+    pub fn gqa_head_rms_norm(
+        x: &mut DeviceBuf,
+        w: Option<&DeviceBuf>,
+        rows: u32,
+        head_dim: u32,
+        eps: f32,
+    ) -> Result {
+        check(
+            unsafe {
+                pulsar_gqa_head_rms_norm(
+                    x.ptr_mut(),
+                    w.map_or(std::ptr::null(), |b| b.ptr()),
+                    rows,
+                    head_dim,
+                    eps,
+                )
+            },
+            "gqa_head_rms_norm",
+        )
+    }
+
+    pub fn gqa_rope(
+        x: &mut DeviceBuf,
+        n_tok: u32,
+        n_head: u32,
+        head_dim: u32,
+        rot_dim: u32,
+        pos0: u32,
+        theta: f32,
+        factors: Option<&DeviceBuf>,
+    ) -> Result {
+        check(
+            unsafe {
+                pulsar_gqa_rope(
+                    x.ptr_mut(),
+                    n_tok,
+                    n_head,
+                    head_dim,
+                    rot_dim,
+                    pos0,
+                    theta,
+                    factors.map_or(std::ptr::null(), |b| b.ptr()),
+                )
+            },
+            "gqa_rope",
+        )
     }
 
     /// KV cache storage format (kvq). 0 = f32 (exact), 1 = fp8 e4m3 +
     /// per-row scale, 2 = fp16, 3 = int8 + per-row scale, 4 = q8_0,
     /// 5 = q4_0. Opt-in via PULSAR_KV=<fmt>; row stride per format.
     #[allow(clippy::too_many_arguments)]
-    pub fn gqa_kv_append(cache: &mut DeviceBuf, kv: &DeviceBuf, n_tok: u32, n_kv_head: u32, head_dim: u32, cap: u32, pos0: u32, kvq: u32) -> Result {
-        check(unsafe { pulsar_gqa_kv_append(cache.ptr_mut(), kv.ptr(), n_tok, n_kv_head, head_dim, cap, pos0, kvq) }, "gqa_kv_append")
+    pub fn gqa_kv_append(
+        cache: &mut DeviceBuf,
+        kv: &DeviceBuf,
+        n_tok: u32,
+        n_kv_head: u32,
+        head_dim: u32,
+        cap: u32,
+        pos0: u32,
+        kvq: u32,
+    ) -> Result {
+        check(
+            unsafe {
+                pulsar_gqa_kv_append(
+                    cache.ptr_mut(),
+                    kv.ptr(),
+                    n_tok,
+                    n_kv_head,
+                    head_dim,
+                    cap,
+                    pos0,
+                    kvq,
+                )
+            },
+            "gqa_kv_append",
+        )
     }
 
     #[allow(clippy::too_many_arguments)]
-    pub fn gqa_attention(out: &mut DeviceBuf, q: &DeviceBuf, k_cache: &DeviceBuf, v_cache: &DeviceBuf, n_tok: u32, n_head: u32, n_kv_head: u32, head_dim: u32, cap: u32, pos0: u32, scale: f32, window: u32) -> Result {
-        gqa_attention_rel(out, q, k_cache, v_cache, n_tok, n_head, n_kv_head, head_dim, cap, pos0, scale, window, None, 0, 0, None)
+    pub fn gqa_attention(
+        out: &mut DeviceBuf,
+        q: &DeviceBuf,
+        k_cache: &DeviceBuf,
+        v_cache: &DeviceBuf,
+        n_tok: u32,
+        n_head: u32,
+        n_kv_head: u32,
+        head_dim: u32,
+        cap: u32,
+        pos0: u32,
+        scale: f32,
+        window: u32,
+    ) -> Result {
+        gqa_attention_rel(
+            out, q, k_cache, v_cache, n_tok, n_head, n_kv_head, head_dim, cap, pos0, scale, window,
+            None, 0, 0, None,
+        )
     }
 
     /// GQA attention with an optional inkling relative-position bias:
     /// rel is [n_tok][n_head][rel_extent], score(i,j) += rel[i-j] in-band.
     #[allow(clippy::too_many_arguments)]
-    pub fn gqa_attention_rel(out: &mut DeviceBuf, q: &DeviceBuf, k_cache: &DeviceBuf, v_cache: &DeviceBuf, n_tok: u32, n_head: u32, n_kv_head: u32, head_dim: u32, cap: u32, pos0: u32, scale: f32, window: u32, rel: Option<&DeviceBuf>, rel_extent: u32, kvq: u32, sinks: Option<&DeviceBuf>) -> Result {
+    pub fn gqa_attention_rel(
+        out: &mut DeviceBuf,
+        q: &DeviceBuf,
+        k_cache: &DeviceBuf,
+        v_cache: &DeviceBuf,
+        n_tok: u32,
+        n_head: u32,
+        n_kv_head: u32,
+        head_dim: u32,
+        cap: u32,
+        pos0: u32,
+        scale: f32,
+        window: u32,
+        rel: Option<&DeviceBuf>,
+        rel_extent: u32,
+        kvq: u32,
+        sinks: Option<&DeviceBuf>,
+    ) -> Result {
         check(
             unsafe {
-                pulsar_gqa_attention(out.ptr_mut(), q.ptr(), k_cache.ptr(), v_cache.ptr(), n_tok, n_head, n_kv_head, head_dim, cap, pos0, scale, window, rel.map_or(std::ptr::null(), |r| r.ptr()), rel_extent, kvq, sinks.map_or(std::ptr::null(), |b| b.ptr()))
+                pulsar_gqa_attention(
+                    out.ptr_mut(),
+                    q.ptr(),
+                    k_cache.ptr(),
+                    v_cache.ptr(),
+                    n_tok,
+                    n_head,
+                    n_kv_head,
+                    head_dim,
+                    cap,
+                    pos0,
+                    scale,
+                    window,
+                    rel.map_or(std::ptr::null(), |r| r.ptr()),
+                    rel_extent,
+                    kvq,
+                    sinks.map_or(std::ptr::null(), |b| b.ptr()),
+                )
             },
             "gqa_attention",
         )
@@ -1101,9 +2502,27 @@ mod real {
 
     /// Inkling shortconv: out = x + causal depthwise conv over the last K
     /// inputs; state [w][K-1] rolls forward (zero it at pos 0). out != x.
-    pub fn sconv(out: &mut DeviceBuf, x: &DeviceBuf, kern: &DeviceBuf, state: &mut DeviceBuf, n_tok: u32, w: u32, k: u32) -> Result {
+    pub fn sconv(
+        out: &mut DeviceBuf,
+        x: &DeviceBuf,
+        kern: &DeviceBuf,
+        state: &mut DeviceBuf,
+        n_tok: u32,
+        w: u32,
+        k: u32,
+    ) -> Result {
         check(
-            unsafe { pulsar_sconv(out.ptr_mut(), x.ptr(), kern.ptr(), state.ptr_mut(), n_tok, w, k) },
+            unsafe {
+                pulsar_sconv(
+                    out.ptr_mut(),
+                    x.ptr(),
+                    kern.ptr(),
+                    state.ptr_mut(),
+                    n_tok,
+                    w,
+                    k,
+                )
+            },
             "sconv",
         )
     }
@@ -1140,10 +2559,32 @@ mod real {
         unsafe { pulsar_mla_selftest() != 0 }
     }
 
-    pub fn mla_rope_tail(x: &mut DeviceBuf, n_tok: u32, n_head: u32, head_dim: u32, rot_dim: u32, pos0: u32, r: &RopeCfg) -> Result {
+    pub fn mla_rope_tail(
+        x: &mut DeviceBuf,
+        n_tok: u32,
+        n_head: u32,
+        head_dim: u32,
+        rot_dim: u32,
+        pos0: u32,
+        r: &RopeCfg,
+    ) -> Result {
         check(
             unsafe {
-                pulsar_mla_rope_tail(x.ptr_mut(), n_tok, n_head, head_dim, rot_dim, pos0, r.n_ctx_orig, r.freq_base, r.freq_scale, r.ext_factor, r.attn_factor, r.beta_fast, r.beta_slow)
+                pulsar_mla_rope_tail(
+                    x.ptr_mut(),
+                    n_tok,
+                    n_head,
+                    head_dim,
+                    rot_dim,
+                    pos0,
+                    r.n_ctx_orig,
+                    r.freq_base,
+                    r.freq_scale,
+                    r.ext_factor,
+                    r.attn_factor,
+                    r.beta_fast,
+                    r.beta_slow,
+                )
             },
             "mla_rope_tail",
         )
@@ -1152,10 +2593,34 @@ mod real {
     /// deepseek4 rope tail: mla_rope_tail plus inverse mode (heads get
     /// un-rotated before the grouped output projection).
     #[allow(clippy::too_many_arguments)]
-    pub fn dsv4_rope_tail(x: &mut DeviceBuf, n_tok: u32, n_head: u32, head_dim: u32, rot_dim: u32, pos0: u32, r: &RopeCfg, inverse: bool) -> Result {
+    pub fn dsv4_rope_tail(
+        x: &mut DeviceBuf,
+        n_tok: u32,
+        n_head: u32,
+        head_dim: u32,
+        rot_dim: u32,
+        pos0: u32,
+        r: &RopeCfg,
+        inverse: bool,
+    ) -> Result {
         check(
             unsafe {
-                pulsar_dsv4_rope_tail(x.ptr_mut(), n_tok, n_head, head_dim, rot_dim, pos0, r.n_ctx_orig, r.freq_base, r.freq_scale, r.ext_factor, r.attn_factor, r.beta_fast, r.beta_slow, inverse as u32)
+                pulsar_dsv4_rope_tail(
+                    x.ptr_mut(),
+                    n_tok,
+                    n_head,
+                    head_dim,
+                    rot_dim,
+                    pos0,
+                    r.n_ctx_orig,
+                    r.freq_base,
+                    r.freq_scale,
+                    r.ext_factor,
+                    r.attn_factor,
+                    r.beta_fast,
+                    r.beta_slow,
+                    inverse as u32,
+                )
             },
             "dsv4_rope_tail",
         )
@@ -1165,11 +2630,29 @@ mod real {
     /// sum_src st_c[j*n_hc+src]*streams[src]. Serves the pre reduce
     /// (n_out 1), post expand (n_out 4) and the output-head merge.
     #[allow(clippy::too_many_arguments)]
-    pub fn dsv4_hc_mix(out: &mut DeviceBuf, streams: &DeviceBuf, block: Option<&DeviceBuf>, st_c: &[f32], blk_c: Option<&[f32]>, n_embd: u32, n_hc: u32, n_out: u32) -> Result {
+    pub fn dsv4_hc_mix(
+        out: &mut DeviceBuf,
+        streams: &DeviceBuf,
+        block: Option<&DeviceBuf>,
+        st_c: &[f32],
+        blk_c: Option<&[f32]>,
+        n_embd: u32,
+        n_hc: u32,
+        n_out: u32,
+    ) -> Result {
         debug_assert_eq!(st_c.len(), (n_out * n_hc) as usize);
         check(
             unsafe {
-                pulsar_dsv4_hc_mix(out.ptr_mut(), streams.ptr(), block.map_or(std::ptr::null(), |b| b.ptr()), st_c.as_ptr(), blk_c.map_or(std::ptr::null(), |b| b.as_ptr()), n_embd, n_hc, n_out)
+                pulsar_dsv4_hc_mix(
+                    out.ptr_mut(),
+                    streams.ptr(),
+                    block.map_or(std::ptr::null(), |b| b.ptr()),
+                    st_c.as_ptr(),
+                    blk_c.map_or(std::ptr::null(), |b| b.as_ptr()),
+                    n_embd,
+                    n_hc,
+                    n_out,
+                )
             },
             "dsv4_hc_mix",
         )
@@ -1178,19 +2661,59 @@ mod real {
     /// deepseek4 decode attention: sinks + raw SWA ring + compressed
     /// rows (K == V), optional per-comp-row visibility mask.
     #[allow(clippy::too_many_arguments)]
-    pub fn dsv4_attention(out: &mut DeviceBuf, q: &DeviceBuf, raw: &DeviceBuf, n_raw: u32, comp: Option<&DeviceBuf>, n_comp: u32, allowed: Option<&DeviceBuf>, sinks: &DeviceBuf, n_head: u32, head_dim: u32, scale: f32) -> Result {
-        dsv4_attention_at(out, 0, q, 0, raw, n_raw, comp, n_comp, allowed, sinks, n_head, head_dim, scale)
+    pub fn dsv4_attention(
+        out: &mut DeviceBuf,
+        q: &DeviceBuf,
+        raw: &DeviceBuf,
+        n_raw: u32,
+        comp: Option<&DeviceBuf>,
+        n_comp: u32,
+        allowed: Option<&DeviceBuf>,
+        sinks: &DeviceBuf,
+        n_head: u32,
+        head_dim: u32,
+        scale: f32,
+    ) -> Result {
+        dsv4_attention_at(
+            out, 0, q, 0, raw, n_raw, comp, n_comp, allowed, sinks, n_head, head_dim, scale,
+        )
     }
 
     /// dsv4_attention with byte offsets into out/q (chunked prefill's
     /// per-token interleave).
     #[allow(clippy::too_many_arguments)]
-    pub fn dsv4_attention_at(out: &mut DeviceBuf, out_off: usize, q: &DeviceBuf, q_off: usize, raw: &DeviceBuf, n_raw: u32, comp: Option<&DeviceBuf>, n_comp: u32, allowed: Option<&DeviceBuf>, sinks: &DeviceBuf, n_head: u32, head_dim: u32, scale: f32) -> Result {
+    pub fn dsv4_attention_at(
+        out: &mut DeviceBuf,
+        out_off: usize,
+        q: &DeviceBuf,
+        q_off: usize,
+        raw: &DeviceBuf,
+        n_raw: u32,
+        comp: Option<&DeviceBuf>,
+        n_comp: u32,
+        allowed: Option<&DeviceBuf>,
+        sinks: &DeviceBuf,
+        n_head: u32,
+        head_dim: u32,
+        scale: f32,
+    ) -> Result {
         let out_ptr = unsafe { (out.ptr_mut() as *mut u8).add(out_off) as *mut c_void };
         let q_ptr = unsafe { (q.ptr() as *const u8).add(q_off) as *const c_void };
         check(
             unsafe {
-                pulsar_dsv4_attention(out_ptr, q_ptr, raw.ptr(), n_raw, comp.map_or(std::ptr::null(), |b| b.ptr()), n_comp, allowed.map_or(std::ptr::null(), |b| b.ptr()), sinks.ptr(), n_head, head_dim, scale)
+                pulsar_dsv4_attention(
+                    out_ptr,
+                    q_ptr,
+                    raw.ptr(),
+                    n_raw,
+                    comp.map_or(std::ptr::null(), |b| b.ptr()),
+                    n_comp,
+                    allowed.map_or(std::ptr::null(), |b| b.ptr()),
+                    sinks.ptr(),
+                    n_head,
+                    head_dim,
+                    scale,
+                )
             },
             "dsv4_attention",
         )
@@ -1200,13 +2723,42 @@ mod real {
     /// per-token mask blob of the batched mask path: token i's mask lives
     /// at allowed_off bytes into the blob).
     #[allow(clippy::too_many_arguments)]
-    pub fn dsv4_attention_at_allowed_off(out: &mut DeviceBuf, out_off: usize, q: &DeviceBuf, q_off: usize, raw: &DeviceBuf, n_raw: u32, comp: Option<&DeviceBuf>, n_comp: u32, allowed: Option<&DeviceBuf>, allowed_off: usize, sinks: &DeviceBuf, n_head: u32, head_dim: u32, scale: f32) -> Result {
+    pub fn dsv4_attention_at_allowed_off(
+        out: &mut DeviceBuf,
+        out_off: usize,
+        q: &DeviceBuf,
+        q_off: usize,
+        raw: &DeviceBuf,
+        n_raw: u32,
+        comp: Option<&DeviceBuf>,
+        n_comp: u32,
+        allowed: Option<&DeviceBuf>,
+        allowed_off: usize,
+        sinks: &DeviceBuf,
+        n_head: u32,
+        head_dim: u32,
+        scale: f32,
+    ) -> Result {
         let out_ptr = unsafe { (out.ptr_mut() as *mut u8).add(out_off) as *mut c_void };
         let q_ptr = unsafe { (q.ptr() as *const u8).add(q_off) as *const c_void };
-        let a_ptr = allowed.map_or(std::ptr::null(), |b| unsafe { (b.ptr() as *const u8).add(allowed_off) as *const c_void });
+        let a_ptr = allowed.map_or(std::ptr::null(), |b| unsafe {
+            (b.ptr() as *const u8).add(allowed_off) as *const c_void
+        });
         check(
             unsafe {
-                pulsar_dsv4_attention(out_ptr, q_ptr, raw.ptr(), n_raw, comp.map_or(std::ptr::null(), |b| b.ptr()), n_comp, a_ptr, sinks.ptr(), n_head, head_dim, scale)
+                pulsar_dsv4_attention(
+                    out_ptr,
+                    q_ptr,
+                    raw.ptr(),
+                    n_raw,
+                    comp.map_or(std::ptr::null(), |b| b.ptr()),
+                    n_comp,
+                    a_ptr,
+                    sinks.ptr(),
+                    n_head,
+                    head_dim,
+                    scale,
+                )
             },
             "dsv4_attention",
         )
@@ -1217,14 +2769,44 @@ mod real {
     /// snapshot, captured at record time because the live ring is
     /// mutated in-loop by later tokens).
     #[allow(clippy::too_many_arguments)]
-    pub fn dsv4_attention_at_batch(out: &mut DeviceBuf, out_off: usize, q: &DeviceBuf, q_off: usize, raw: &DeviceBuf, raw_off: usize, n_raw: u32, comp: Option<&DeviceBuf>, n_comp: u32, allowed: Option<&DeviceBuf>, allowed_off: usize, sinks: &DeviceBuf, n_head: u32, head_dim: u32, scale: f32) -> Result {
+    pub fn dsv4_attention_at_batch(
+        out: &mut DeviceBuf,
+        out_off: usize,
+        q: &DeviceBuf,
+        q_off: usize,
+        raw: &DeviceBuf,
+        raw_off: usize,
+        n_raw: u32,
+        comp: Option<&DeviceBuf>,
+        n_comp: u32,
+        allowed: Option<&DeviceBuf>,
+        allowed_off: usize,
+        sinks: &DeviceBuf,
+        n_head: u32,
+        head_dim: u32,
+        scale: f32,
+    ) -> Result {
         let out_ptr = unsafe { (out.ptr_mut() as *mut u8).add(out_off) as *mut c_void };
         let q_ptr = unsafe { (q.ptr() as *const u8).add(q_off) as *const c_void };
         let raw_ptr = unsafe { (raw.ptr() as *const u8).add(raw_off) as *const c_void };
-        let a_ptr = allowed.map_or(std::ptr::null(), |b| unsafe { (b.ptr() as *const u8).add(allowed_off) as *const c_void });
+        let a_ptr = allowed.map_or(std::ptr::null(), |b| unsafe {
+            (b.ptr() as *const u8).add(allowed_off) as *const c_void
+        });
         check(
             unsafe {
-                pulsar_dsv4_attention(out_ptr, q_ptr, raw_ptr, n_raw, comp.map_or(std::ptr::null(), |b| b.ptr()), n_comp, a_ptr, sinks.ptr(), n_head, head_dim, scale)
+                pulsar_dsv4_attention(
+                    out_ptr,
+                    q_ptr,
+                    raw_ptr,
+                    n_raw,
+                    comp.map_or(std::ptr::null(), |b| b.ptr()),
+                    n_comp,
+                    a_ptr,
+                    sinks.ptr(),
+                    n_head,
+                    head_dim,
+                    scale,
+                )
             },
             "dsv4_attention",
         )
@@ -1233,38 +2815,133 @@ mod real {
     /// ds4's fp8 e4m3 round-trip on the non-rope dims of each row
     /// (64-wide blocks, power-of-2 scale, clamp +-448). In place.
     pub fn dsv4_fp8_sim(x: &mut DeviceBuf, n_rows: u32, head_dim: u32, n_rot: u32) -> Result {
-        check(unsafe { pulsar_dsv4_fp8_sim(x.ptr_mut(), n_rows, head_dim, n_rot) }, "dsv4_fp8_sim")
+        check(
+            unsafe { pulsar_dsv4_fp8_sim(x.ptr_mut(), n_rows, head_dim, n_rot) },
+            "dsv4_fp8_sim",
+        )
     }
 
     /// Round f32 values through f16 storage in place (V4 cache rows).
     pub fn dsv4_f16_round(x: &mut DeviceBuf, n: u32) -> Result {
-        check(unsafe { pulsar_dsv4_f16_round(x.ptr_mut(), n) }, "dsv4_f16_round")
+        check(
+            unsafe { pulsar_dsv4_f16_round(x.ptr_mut(), n) },
+            "dsv4_f16_round",
+        )
     }
 
     /// Device-side Sinkhorn HC gate split: mix[6*n_hc] -> coef buffer
     /// (pre | post | comb in kernel layout), zero host round-trips.
     #[allow(clippy::too_many_arguments)]
-    pub fn dsv4_sinkhorn(coef: &mut DeviceBuf, mix: &DeviceBuf, scale: &DeviceBuf, base: &DeviceBuf, n_hc: u32, iters: u32, eps: f32, n_tok: u32) -> Result {
-        check(unsafe { pulsar_dsv4_sinkhorn(coef.ptr_mut(), mix.ptr(), scale.ptr(), base.ptr(), n_hc, iters, eps, n_tok) }, "dsv4_sinkhorn")
+    pub fn dsv4_sinkhorn(
+        coef: &mut DeviceBuf,
+        mix: &DeviceBuf,
+        scale: &DeviceBuf,
+        base: &DeviceBuf,
+        n_hc: u32,
+        iters: u32,
+        eps: f32,
+        n_tok: u32,
+    ) -> Result {
+        check(
+            unsafe {
+                pulsar_dsv4_sinkhorn(
+                    coef.ptr_mut(),
+                    mix.ptr(),
+                    scale.ptr(),
+                    base.ptr(),
+                    n_hc,
+                    iters,
+                    eps,
+                    n_tok,
+                )
+            },
+            "dsv4_sinkhorn",
+        )
     }
 
     /// hc_mix with device-resident coefficients (offsets into the
     /// sinkhorn coef buffer; blk_off -1 = no block gains).
     #[allow(clippy::too_many_arguments)]
-    pub fn dsv4_hc_mix_dev(out: &mut DeviceBuf, streams: &DeviceBuf, block: Option<&DeviceBuf>, coef: &DeviceBuf, st_off: u32, blk_off: i32, n_embd: u32, n_hc: u32, n_out: u32, n_tok: u32) -> Result {
-        check(unsafe { pulsar_dsv4_hc_mix_dev(out.ptr_mut(), streams.ptr(), block.map_or(std::ptr::null(), |b| b.ptr()), coef.ptr(), st_off, blk_off, n_embd, n_hc, n_out, n_tok) }, "dsv4_hc_mix_dev")
+    pub fn dsv4_hc_mix_dev(
+        out: &mut DeviceBuf,
+        streams: &DeviceBuf,
+        block: Option<&DeviceBuf>,
+        coef: &DeviceBuf,
+        st_off: u32,
+        blk_off: i32,
+        n_embd: u32,
+        n_hc: u32,
+        n_out: u32,
+        n_tok: u32,
+    ) -> Result {
+        check(
+            unsafe {
+                pulsar_dsv4_hc_mix_dev(
+                    out.ptr_mut(),
+                    streams.ptr(),
+                    block.map_or(std::ptr::null(), |b| b.ptr()),
+                    coef.ptr(),
+                    st_off,
+                    blk_off,
+                    n_embd,
+                    n_hc,
+                    n_out,
+                    n_tok,
+                )
+            },
+            "dsv4_hc_mix_dev",
+        )
     }
 
     /// Streaming compressor step fully on-device; cache_row is the
     /// emit target (pass a dummy when emit is false).
     #[allow(clippy::too_many_arguments)]
-    pub fn dsv4_comp_step(state_kv: &mut DeviceBuf, state_sc: &mut DeviceBuf, cache_row: &mut DeviceBuf, cache_off: usize, kv_cur: &DeviceBuf, sc_cur: &DeviceBuf, cur_off: usize, ape: &DeviceBuf, norm: &DeviceBuf, width: u32, head_dim: u32, ratio: u32, pos: u32, emit: bool, is_idx: bool, rms_eps: f32, r: &RopeCfg) -> Result {
+    pub fn dsv4_comp_step(
+        state_kv: &mut DeviceBuf,
+        state_sc: &mut DeviceBuf,
+        cache_row: &mut DeviceBuf,
+        cache_off: usize,
+        kv_cur: &DeviceBuf,
+        sc_cur: &DeviceBuf,
+        cur_off: usize,
+        ape: &DeviceBuf,
+        norm: &DeviceBuf,
+        width: u32,
+        head_dim: u32,
+        ratio: u32,
+        pos: u32,
+        emit: bool,
+        is_idx: bool,
+        rms_eps: f32,
+        r: &RopeCfg,
+    ) -> Result {
         let row_ptr = unsafe { (cache_row.ptr_mut() as *mut u8).add(cache_off) as *mut c_void };
         let kv_ptr = unsafe { (kv_cur.ptr() as *const u8).add(cur_off) as *const c_void };
         let sc_ptr = unsafe { (sc_cur.ptr() as *const u8).add(cur_off) as *const c_void };
         check(
             unsafe {
-                pulsar_dsv4_comp_step(state_kv.ptr_mut(), state_sc.ptr_mut(), row_ptr, kv_ptr, sc_ptr, ape.ptr(), norm.ptr(), width, head_dim, ratio, pos, emit as u32, is_idx as u32, rms_eps, 64, r.n_ctx_orig, r.freq_base, r.freq_scale, r.ext_factor, r.attn_factor)
+                pulsar_dsv4_comp_step(
+                    state_kv.ptr_mut(),
+                    state_sc.ptr_mut(),
+                    row_ptr,
+                    kv_ptr,
+                    sc_ptr,
+                    ape.ptr(),
+                    norm.ptr(),
+                    width,
+                    head_dim,
+                    ratio,
+                    pos,
+                    emit as u32,
+                    is_idx as u32,
+                    rms_eps,
+                    64,
+                    r.n_ctx_orig,
+                    r.freq_base,
+                    r.freq_scale,
+                    r.ext_factor,
+                    r.attn_factor,
+                )
             },
             "dsv4_comp_step",
         )
@@ -1276,33 +2953,99 @@ mod real {
 
     /// qwen35 GDN: depthwise conv (K taps) + silu over one token's qkv
     /// row; state [K-1][n_chan] rolls forward in place.
-    pub fn qwen35_conv_step(out: &mut DeviceBuf, x: &DeviceBuf, kern: &DeviceBuf, state: &mut DeviceBuf, n_chan: u32, k: u32) -> Result {
-        check(unsafe { pulsar_qwen35_conv_step(out.ptr_mut(), x.ptr(), kern.ptr(), state.ptr_mut(), n_chan, k) }, "qwen35_conv_step")
+    pub fn qwen35_conv_step(
+        out: &mut DeviceBuf,
+        x: &DeviceBuf,
+        kern: &DeviceBuf,
+        state: &mut DeviceBuf,
+        n_chan: u32,
+        k: u32,
+    ) -> Result {
+        check(
+            unsafe {
+                pulsar_qwen35_conv_step(
+                    out.ptr_mut(),
+                    x.ptr(),
+                    kern.ptr(),
+                    state.ptr_mut(),
+                    n_chan,
+                    k,
+                )
+            },
+            "qwen35_conv_step",
+        )
     }
 
     /// L2-normalize rows in place (ggml_l2_norm: x / sqrt(sum x^2 + eps)).
     pub fn qwen35_l2_norm(x: &mut DeviceBuf, rows: u32, dim: u32, eps: f32) -> Result {
-        check(unsafe { pulsar_qwen35_l2_norm(x.ptr_mut(), rows, dim, eps) }, "qwen35_l2_norm")
+        check(
+            unsafe { pulsar_qwen35_l2_norm(x.ptr_mut(), rows, dim, eps) },
+            "qwen35_l2_norm",
+        )
     }
 
     /// Gated DeltaNet autoregressive step (one token, all heads):
     /// decay + delta-rule rank-1 state update + output, in place on
     /// state [h_v][dim][dim]. q/k are h_k-headed (repeat h_v/h_k).
     #[allow(clippy::too_many_arguments)]
-    pub fn qwen35_gdn_step(out: &mut DeviceBuf, state: &mut DeviceBuf, q: &DeviceBuf, k: &DeviceBuf, v: &DeviceBuf, g: &DeviceBuf, beta: &DeviceBuf, h_v: u32, h_k: u32, dim: u32) -> Result {
-        check(unsafe { pulsar_qwen35_gdn_step(out.ptr_mut(), state.ptr_mut(), q.ptr(), k.ptr(), v.ptr(), g.ptr(), beta.ptr(), h_v, h_k, dim) }, "qwen35_gdn_step")
+    pub fn qwen35_gdn_step(
+        out: &mut DeviceBuf,
+        state: &mut DeviceBuf,
+        q: &DeviceBuf,
+        k: &DeviceBuf,
+        v: &DeviceBuf,
+        g: &DeviceBuf,
+        beta: &DeviceBuf,
+        h_v: u32,
+        h_k: u32,
+        dim: u32,
+    ) -> Result {
+        check(
+            unsafe {
+                pulsar_qwen35_gdn_step(
+                    out.ptr_mut(),
+                    state.ptr_mut(),
+                    q.ptr(),
+                    k.ptr(),
+                    v.ptr(),
+                    g.ptr(),
+                    beta.ptr(),
+                    h_v,
+                    h_k,
+                    dim,
+                )
+            },
+            "qwen35_gdn_step",
+        )
     }
 
     /// Split the fused per-head [q dim | gate dim] projection into
     /// contiguous q and gate buffers.
-    pub fn qwen35_split_gate(q: &mut DeviceBuf, gate: &mut DeviceBuf, fused: &DeviceBuf, n_head: u32, dim: u32) -> Result {
-        check(unsafe { pulsar_qwen35_split_gate(q.ptr_mut(), gate.ptr_mut(), fused.ptr(), n_head, dim) }, "qwen35_split_gate")
+    pub fn qwen35_split_gate(
+        q: &mut DeviceBuf,
+        gate: &mut DeviceBuf,
+        fused: &DeviceBuf,
+        n_head: u32,
+        dim: u32,
+    ) -> Result {
+        check(
+            unsafe {
+                pulsar_qwen35_split_gate(q.ptr_mut(), gate.ptr_mut(), fused.ptr(), n_head, dim)
+            },
+            "qwen35_split_gate",
+        )
     }
 
     /// x *= sigmoid(gate) elementwise.
     /// Laguna per-head output gate: x [n_tok][n_head][head_dim] scaled by
     /// softplus(gate[n_tok][n_head]), one scalar per head row.
-    pub fn laguna_head_gate(x: &mut DeviceBuf, gate: &DeviceBuf, n_tok: u32, n_head: u32, head_dim: u32) -> Result {
+    pub fn laguna_head_gate(
+        x: &mut DeviceBuf,
+        gate: &DeviceBuf,
+        n_tok: u32,
+        n_head: u32,
+        head_dim: u32,
+    ) -> Result {
         check(
             unsafe { pulsar_laguna_head_gate(x.ptr_mut(), gate.ptr(), n_tok, n_head, head_dim) },
             "laguna_head_gate",
@@ -1310,30 +3053,113 @@ mod real {
     }
 
     pub fn qwen35_sigmoid_gate(x: &mut DeviceBuf, gate: &DeviceBuf, n: u32) -> Result {
-        check(unsafe { pulsar_qwen35_sigmoid_gate(x.ptr_mut(), gate.ptr(), n) }, "qwen35_sigmoid_gate")
+        check(
+            unsafe { pulsar_qwen35_sigmoid_gate(x.ptr_mut(), gate.ptr(), n) },
+            "qwen35_sigmoid_gate",
+        )
     }
 
     /// Batched conv+silu: n_tok tokens sequentially in one launch.
-    pub fn qwen35_conv_batch(out: &mut DeviceBuf, x: &DeviceBuf, kern: &DeviceBuf, state: &mut DeviceBuf, n_chan: u32, k: u32, n_tok: u32) -> Result {
-        check(unsafe { pulsar_qwen35_conv_batch(out.ptr_mut(), x.ptr(), kern.ptr(), state.ptr_mut(), n_chan, k, n_tok) }, "qwen35_conv_batch")
+    pub fn qwen35_conv_batch(
+        out: &mut DeviceBuf,
+        x: &DeviceBuf,
+        kern: &DeviceBuf,
+        state: &mut DeviceBuf,
+        n_chan: u32,
+        k: u32,
+        n_tok: u32,
+    ) -> Result {
+        check(
+            unsafe {
+                pulsar_qwen35_conv_batch(
+                    out.ptr_mut(),
+                    x.ptr(),
+                    kern.ptr(),
+                    state.ptr_mut(),
+                    n_chan,
+                    k,
+                    n_tok,
+                )
+            },
+            "qwen35_conv_batch",
+        )
     }
 
     /// Batched GDN delta rule: state columns ride registers across n_tok
     /// sequential steps (dim <= 128).
     #[allow(clippy::too_many_arguments)]
-    pub fn qwen35_gdn_batch(out: &mut DeviceBuf, state: &mut DeviceBuf, q: &DeviceBuf, k: &DeviceBuf, v: &DeviceBuf, g: &DeviceBuf, beta: &DeviceBuf, h_v: u32, h_k: u32, dim: u32, n_tok: u32) -> Result {
-        check(unsafe { pulsar_qwen35_gdn_batch(out.ptr_mut(), state.ptr_mut(), q.ptr(), k.ptr(), v.ptr(), g.ptr(), beta.ptr(), h_v, h_k, dim, n_tok) }, "qwen35_gdn_batch")
+    pub fn qwen35_gdn_batch(
+        out: &mut DeviceBuf,
+        state: &mut DeviceBuf,
+        q: &DeviceBuf,
+        k: &DeviceBuf,
+        v: &DeviceBuf,
+        g: &DeviceBuf,
+        beta: &DeviceBuf,
+        h_v: u32,
+        h_k: u32,
+        dim: u32,
+        n_tok: u32,
+    ) -> Result {
+        check(
+            unsafe {
+                pulsar_qwen35_gdn_batch(
+                    out.ptr_mut(),
+                    state.ptr_mut(),
+                    q.ptr(),
+                    k.ptr(),
+                    v.ptr(),
+                    g.ptr(),
+                    beta.ptr(),
+                    h_v,
+                    h_k,
+                    dim,
+                    n_tok,
+                )
+            },
+            "qwen35_gdn_batch",
+        )
     }
 
     /// x[row] *= s[row] (batched per-token scalar gates).
     pub fn qwen35_row_scale(x: &mut DeviceBuf, s: &DeviceBuf, n_rows: u32, dim: u32) -> Result {
-        check(unsafe { pulsar_qwen35_row_scale(x.ptr_mut(), s.ptr(), n_rows, dim) }, "qwen35_row_scale")
+        check(
+            unsafe { pulsar_qwen35_row_scale(x.ptr_mut(), s.ptr(), n_rows, dim) },
+            "qwen35_row_scale",
+        )
     }
 
     /// Non-causal GQA attention over contiguous K/V rows (DFlash draft).
     #[allow(clippy::too_many_arguments)]
-    pub fn qwen35_draft_attn(out: &mut DeviceBuf, q: &DeviceBuf, k: &DeviceBuf, v: &DeviceBuf, n_q: u32, n_kv: u32, n_head: u32, n_kv_head: u32, dim: u32, scale: f32) -> Result {
-        check(unsafe { pulsar_qwen35_draft_attn(out.ptr_mut(), q.ptr(), k.ptr(), v.ptr(), n_q, n_kv, n_head, n_kv_head, dim, scale) }, "qwen35_draft_attn")
+    pub fn qwen35_draft_attn(
+        out: &mut DeviceBuf,
+        q: &DeviceBuf,
+        k: &DeviceBuf,
+        v: &DeviceBuf,
+        n_q: u32,
+        n_kv: u32,
+        n_head: u32,
+        n_kv_head: u32,
+        dim: u32,
+        scale: f32,
+    ) -> Result {
+        check(
+            unsafe {
+                pulsar_qwen35_draft_attn(
+                    out.ptr_mut(),
+                    q.ptr(),
+                    k.ptr(),
+                    v.ptr(),
+                    n_q,
+                    n_kv,
+                    n_head,
+                    n_kv_head,
+                    dim,
+                    scale,
+                )
+            },
+            "qwen35_draft_attn",
+        )
     }
 
     /// NEOX-paired YaRN rope over the full head (DFlash draft: trained
@@ -1341,45 +3167,173 @@ mod real {
     /// NEOX yarn rope over a partial rotation width (lanes >= rot_dim
     /// pass through). rot_dim == head_dim reproduces the full rotation.
     #[allow(clippy::too_many_arguments)]
-    pub fn rope_yarn_partial(x: &mut DeviceBuf, n_tok: u32, n_head: u32, head_dim: u32, rot_dim: u32, pos0: u32, r: &RopeCfg) -> Result {
+    pub fn rope_yarn_partial(
+        x: &mut DeviceBuf,
+        n_tok: u32,
+        n_head: u32,
+        head_dim: u32,
+        rot_dim: u32,
+        pos0: u32,
+        r: &RopeCfg,
+    ) -> Result {
         check(
             unsafe {
-                pulsar_rope_yarn_partial(x.ptr_mut(), n_tok, n_head, head_dim, rot_dim, pos0,
-                    r.freq_base, r.freq_scale, r.ext_factor, r.attn_factor,
-                    r.beta_fast, r.beta_slow, r.n_ctx_orig)
+                pulsar_rope_yarn_partial(
+                    x.ptr_mut(),
+                    n_tok,
+                    n_head,
+                    head_dim,
+                    rot_dim,
+                    pos0,
+                    r.freq_base,
+                    r.freq_scale,
+                    r.ext_factor,
+                    r.attn_factor,
+                    r.beta_fast,
+                    r.beta_slow,
+                    r.n_ctx_orig,
+                )
             },
             "rope_yarn_partial",
         )
     }
 
-    pub fn qwen35_rope_yarn(x: &mut DeviceBuf, n_tok: u32, n_head: u32, head_dim: u32, pos0: u32, r: &RopeCfg) -> Result {
-        check(unsafe { pulsar_qwen35_rope_yarn(x.ptr_mut(), n_tok, n_head, head_dim, pos0, r.freq_base, r.freq_scale, r.ext_factor, r.attn_factor, r.beta_fast, r.beta_slow, r.n_ctx_orig) }, "qwen35_rope_yarn")
+    pub fn qwen35_rope_yarn(
+        x: &mut DeviceBuf,
+        n_tok: u32,
+        n_head: u32,
+        head_dim: u32,
+        pos0: u32,
+        r: &RopeCfg,
+    ) -> Result {
+        check(
+            unsafe {
+                pulsar_qwen35_rope_yarn(
+                    x.ptr_mut(),
+                    n_tok,
+                    n_head,
+                    head_dim,
+                    pos0,
+                    r.freq_base,
+                    r.freq_scale,
+                    r.ext_factor,
+                    r.attn_factor,
+                    r.beta_fast,
+                    r.beta_slow,
+                    r.n_ctx_orig,
+                )
+            },
+            "qwen35_rope_yarn",
+        )
     }
 
     /// Split conv rows [t][2*key+value] into contiguous q/k/v buffers.
-    pub fn qwen35_split_qkv(q: &mut DeviceBuf, k: &mut DeviceBuf, v: &mut DeviceBuf, x: &DeviceBuf, n_tok: u32, key_dim: u32, value_dim: u32) -> Result {
-        check(unsafe { pulsar_qwen35_split_qkv(q.ptr_mut(), k.ptr_mut(), v.ptr_mut(), x.ptr(), n_tok, key_dim, value_dim) }, "qwen35_split_qkv")
+    pub fn qwen35_split_qkv(
+        q: &mut DeviceBuf,
+        k: &mut DeviceBuf,
+        v: &mut DeviceBuf,
+        x: &DeviceBuf,
+        n_tok: u32,
+        key_dim: u32,
+        value_dim: u32,
+    ) -> Result {
+        check(
+            unsafe {
+                pulsar_qwen35_split_qkv(
+                    q.ptr_mut(),
+                    k.ptr_mut(),
+                    v.ptr_mut(),
+                    x.ptr(),
+                    n_tok,
+                    key_dim,
+                    value_dim,
+                )
+            },
+            "qwen35_split_qkv",
+        )
     }
 
     /// Scatter t rows into ring[(pos+i)%cap] at column offset ring_off.
     #[allow(clippy::too_many_arguments)]
-    pub fn qwen35_ring_scatter(ring: &mut DeviceBuf, src: &DeviceBuf, pos: u32, cap: u32, n_rows: u32, row_elems: u32, ring_stride: u32, ring_off: u32) -> Result {
-        check(unsafe { pulsar_qwen35_ring_scatter(ring.ptr_mut(), src.ptr(), pos, cap, n_rows, row_elems, ring_stride, ring_off) }, "qwen35_ring_scatter")
+    pub fn qwen35_ring_scatter(
+        ring: &mut DeviceBuf,
+        src: &DeviceBuf,
+        pos: u32,
+        cap: u32,
+        n_rows: u32,
+        row_elems: u32,
+        ring_stride: u32,
+        ring_off: u32,
+    ) -> Result {
+        check(
+            unsafe {
+                pulsar_qwen35_ring_scatter(
+                    ring.ptr_mut(),
+                    src.ptr(),
+                    pos,
+                    cap,
+                    n_rows,
+                    row_elems,
+                    ring_stride,
+                    ring_off,
+                )
+            },
+            "qwen35_ring_scatter",
+        )
     }
 
     /// Gather n rows from ring[(start+i)%cap] into a contiguous dst.
-    pub fn qwen35_ring_gather(dst: &mut DeviceBuf, ring: &DeviceBuf, start: u32, cap: u32, n_rows: u32, row_elems: u32) -> Result {
-        check(unsafe { pulsar_qwen35_ring_gather(dst.ptr_mut(), ring.ptr(), start, cap, n_rows, row_elems) }, "qwen35_ring_gather")
+    pub fn qwen35_ring_gather(
+        dst: &mut DeviceBuf,
+        ring: &DeviceBuf,
+        start: u32,
+        cap: u32,
+        n_rows: u32,
+        row_elems: u32,
+    ) -> Result {
+        check(
+            unsafe {
+                pulsar_qwen35_ring_gather(dst.ptr_mut(), ring.ptr(), start, cap, n_rows, row_elems)
+            },
+            "qwen35_ring_gather",
+        )
     }
 
     /// In place over [n_tok][n_head]: g = a*softplus(g+dt), beta = sigmoid(beta).
-    pub fn qwen35_gdn_coeffs(g_alpha: &mut DeviceBuf, beta: &mut DeviceBuf, a: &DeviceBuf, dt: &DeviceBuf, n_tok: u32, n_head: u32) -> Result {
-        check(unsafe { pulsar_qwen35_gdn_coeffs(g_alpha.ptr_mut(), beta.ptr_mut(), a.ptr(), dt.ptr(), n_tok, n_head) }, "qwen35_gdn_coeffs")
+    pub fn qwen35_gdn_coeffs(
+        g_alpha: &mut DeviceBuf,
+        beta: &mut DeviceBuf,
+        a: &DeviceBuf,
+        dt: &DeviceBuf,
+        n_tok: u32,
+        n_head: u32,
+    ) -> Result {
+        check(
+            unsafe {
+                pulsar_qwen35_gdn_coeffs(
+                    g_alpha.ptr_mut(),
+                    beta.ptr_mut(),
+                    a.ptr(),
+                    dt.ptr(),
+                    n_tok,
+                    n_head,
+                )
+            },
+            "qwen35_gdn_coeffs",
+        )
     }
 
     /// x[row] *= sigmoid(s[row]).
-    pub fn qwen35_row_sigmoid_scale(x: &mut DeviceBuf, s: &DeviceBuf, n_rows: u32, dim: u32) -> Result {
-        check(unsafe { pulsar_qwen35_row_sigmoid_scale(x.ptr_mut(), s.ptr(), n_rows, dim) }, "qwen35_row_sigmoid_scale")
+    pub fn qwen35_row_sigmoid_scale(
+        x: &mut DeviceBuf,
+        s: &DeviceBuf,
+        n_rows: u32,
+        dim: u32,
+    ) -> Result {
+        check(
+            unsafe { pulsar_qwen35_row_sigmoid_scale(x.ptr_mut(), s.ptr(), n_rows, dim) },
+            "qwen35_row_sigmoid_scale",
+        )
     }
 
     pub fn qwen35_selftest() -> bool {
@@ -1391,72 +3345,252 @@ mod real {
     /// (g holds [n_tok][n_head][head_dim], `a` holds -exp(A_log)), and
     /// beta becomes sigmoid(beta) per head.
     #[allow(clippy::too_many_arguments)]
-    pub fn k3_kda_coeffs(g: &mut DeviceBuf, beta: &mut DeviceBuf, a: &DeviceBuf, dt: &DeviceBuf, n_tok: u32, n_head: u32, head_dim: u32, g_min: f32) -> Result {
-        check(unsafe { pulsar_k3_kda_coeffs(g.ptr_mut(), beta.ptr_mut(), a.ptr(), dt.ptr(), n_tok, n_head, head_dim, g_min) }, "k3_kda_coeffs")
+    pub fn k3_kda_coeffs(
+        g: &mut DeviceBuf,
+        beta: &mut DeviceBuf,
+        a: &DeviceBuf,
+        dt: &DeviceBuf,
+        n_tok: u32,
+        n_head: u32,
+        head_dim: u32,
+        g_min: f32,
+    ) -> Result {
+        check(
+            unsafe {
+                pulsar_k3_kda_coeffs(
+                    g.ptr_mut(),
+                    beta.ptr_mut(),
+                    a.ptr(),
+                    dt.ptr(),
+                    n_tok,
+                    n_head,
+                    head_dim,
+                    g_min,
+                )
+            },
+            "k3_kda_coeffs",
+        )
     }
 
     /// Kimi Delta Attention autoregressive step (one token, all heads).
     /// Like `qwen35_gdn_step` but the forget gate is per key channel, so
     /// `g` is [n_head][dim] rather than [n_head]; q/k/v are all n_head-wide.
     #[allow(clippy::too_many_arguments)]
-    pub fn k3_kda_step(out: &mut DeviceBuf, state: &mut DeviceBuf, q: &DeviceBuf, k: &DeviceBuf, v: &DeviceBuf, g: &DeviceBuf, beta: &DeviceBuf, n_head: u32, dim: u32) -> Result {
-        check(unsafe { pulsar_k3_kda_step(out.ptr_mut(), state.ptr_mut(), q.ptr(), k.ptr(), v.ptr(), g.ptr(), beta.ptr(), n_head, dim) }, "k3_kda_step")
+    pub fn k3_kda_step(
+        out: &mut DeviceBuf,
+        state: &mut DeviceBuf,
+        q: &DeviceBuf,
+        k: &DeviceBuf,
+        v: &DeviceBuf,
+        g: &DeviceBuf,
+        beta: &DeviceBuf,
+        n_head: u32,
+        dim: u32,
+    ) -> Result {
+        check(
+            unsafe {
+                pulsar_k3_kda_step(
+                    out.ptr_mut(),
+                    state.ptr_mut(),
+                    q.ptr(),
+                    k.ptr(),
+                    v.ptr(),
+                    g.ptr(),
+                    beta.ptr(),
+                    n_head,
+                    dim,
+                )
+            },
+            "k3_kda_step",
+        )
     }
 
     /// Attention Residuals: softmax over depth (the banked block
     /// checkpoints plus the live stream) scored by `w`, mixing the raw
     /// vectors. `n_ckpt == 0` copies `cur` through unchanged.
     #[allow(clippy::too_many_arguments)]
-    pub fn k3_attn_res(out: &mut DeviceBuf, cur: &DeviceBuf, ckpt: Option<&DeviceBuf>, w: &DeviceBuf, n_tok: u32, n_embd: u32, n_ckpt: u32, eps: f32) -> Result {
+    pub fn k3_attn_res(
+        out: &mut DeviceBuf,
+        cur: &DeviceBuf,
+        ckpt: Option<&DeviceBuf>,
+        w: &DeviceBuf,
+        n_tok: u32,
+        n_embd: u32,
+        n_ckpt: u32,
+        eps: f32,
+    ) -> Result {
         let ck = ckpt.map(|b| b.ptr()).unwrap_or(std::ptr::null());
-        check(unsafe { pulsar_k3_attn_res(out.ptr_mut(), cur.ptr(), ck, w.ptr(), n_tok, n_embd, n_ckpt, eps) }, "k3_attn_res")
+        check(
+            unsafe {
+                pulsar_k3_attn_res(
+                    out.ptr_mut(),
+                    cur.ptr(),
+                    ck,
+                    w.ptr(),
+                    n_tok,
+                    n_embd,
+                    n_ckpt,
+                    eps,
+                )
+            },
+            "k3_attn_res",
+        )
     }
 
     pub fn k3_selftest() -> bool {
         unsafe { pulsar_k3_selftest() != 0 }
     }
 
-    pub fn mla_kv_lora_rms_norm(out: &mut DeviceBuf, kv_raw: &DeviceBuf, w: &DeviceBuf, n_tok: u32, kv_raw_dim: u32, kv_lora_dim: u32, eps: f32) -> Result {
+    pub fn mla_kv_lora_rms_norm(
+        out: &mut DeviceBuf,
+        kv_raw: &DeviceBuf,
+        w: &DeviceBuf,
+        n_tok: u32,
+        kv_raw_dim: u32,
+        kv_lora_dim: u32,
+        eps: f32,
+    ) -> Result {
         check(
             unsafe {
-                pulsar_mla_kv_lora_rms_norm(out.ptr_mut(), kv_raw.ptr(), w.ptr(), n_tok, kv_raw_dim, kv_lora_dim, eps)
+                pulsar_mla_kv_lora_rms_norm(
+                    out.ptr_mut(),
+                    kv_raw.ptr(),
+                    w.ptr(),
+                    n_tok,
+                    kv_raw_dim,
+                    kv_lora_dim,
+                    eps,
+                )
             },
             "mla_kv_lora_rms_norm",
         )
     }
 
     #[allow(clippy::too_many_arguments)]
-    pub fn mla_store_compact_kv(kv_lora_cache: &mut DeviceBuf, k_rope_cache: &mut DeviceBuf, kv_norm: &DeviceBuf, kv_raw: &DeviceBuf, pos0: u32, n_tok: u32, cache_cap: u32, kv_raw_dim: u32, kv_lora_dim: u32, qk_rope: u32, kvq: u32) -> Result {
+    pub fn mla_store_compact_kv(
+        kv_lora_cache: &mut DeviceBuf,
+        k_rope_cache: &mut DeviceBuf,
+        kv_norm: &DeviceBuf,
+        kv_raw: &DeviceBuf,
+        pos0: u32,
+        n_tok: u32,
+        cache_cap: u32,
+        kv_raw_dim: u32,
+        kv_lora_dim: u32,
+        qk_rope: u32,
+        kvq: u32,
+    ) -> Result {
         check(
             unsafe {
-                pulsar_mla_store_compact_kv(kv_lora_cache.ptr_mut(), k_rope_cache.ptr_mut(), kv_norm.ptr(), kv_raw.ptr(), pos0, n_tok, cache_cap, kv_raw_dim, kv_lora_dim, qk_rope, kvq)
+                pulsar_mla_store_compact_kv(
+                    kv_lora_cache.ptr_mut(),
+                    k_rope_cache.ptr_mut(),
+                    kv_norm.ptr(),
+                    kv_raw.ptr(),
+                    pos0,
+                    n_tok,
+                    cache_cap,
+                    kv_raw_dim,
+                    kv_lora_dim,
+                    qk_rope,
+                    kvq,
+                )
             },
             "mla_store_compact_kv",
         )
     }
 
-    pub fn mla_fill_selected_range(selected: &mut DeviceBuf, n_tok: u32, pos0: u32, n_selected: u32, pad_row: u32) -> Result {
+    pub fn mla_fill_selected_range(
+        selected: &mut DeviceBuf,
+        n_tok: u32,
+        pos0: u32,
+        n_selected: u32,
+        pad_row: u32,
+    ) -> Result {
         check(
-            unsafe { pulsar_mla_fill_selected_range(selected.ptr_mut(), n_tok, pos0, n_selected, pad_row) },
+            unsafe {
+                pulsar_mla_fill_selected_range(selected.ptr_mut(), n_tok, pos0, n_selected, pad_row)
+            },
             "mla_fill_selected_range",
         )
     }
 
     #[allow(clippy::too_many_arguments)]
-    pub fn mla_qk_lowrank(qk_low: &mut DeviceBuf, q: &DeviceBuf, k_b: &DeviceBuf, n_tok: u32, n_head: u32, kv_lora_dim: u32, qk_nope: u32, qk_dim: u32) -> Result {
+    pub fn mla_qk_lowrank(
+        qk_low: &mut DeviceBuf,
+        q: &DeviceBuf,
+        k_b: &DeviceBuf,
+        n_tok: u32,
+        n_head: u32,
+        kv_lora_dim: u32,
+        qk_nope: u32,
+        qk_dim: u32,
+    ) -> Result {
         check(
             unsafe {
-                pulsar_mla_qk_lowrank(qk_low.ptr_mut(), q.ptr(), k_b.ptr(), n_tok, n_head, kv_lora_dim, qk_nope, qk_dim)
+                pulsar_mla_qk_lowrank(
+                    qk_low.ptr_mut(),
+                    q.ptr(),
+                    k_b.ptr(),
+                    n_tok,
+                    n_head,
+                    kv_lora_dim,
+                    qk_nope,
+                    qk_dim,
+                )
             },
             "mla_qk_lowrank",
         )
     }
 
     #[allow(clippy::too_many_arguments)]
-    pub fn mla_attention(heads: &mut DeviceBuf, q: &DeviceBuf, qk_low: &DeviceBuf, kv_lora_cache: &DeviceBuf, k_rope_cache: &DeviceBuf, v_b: &DeviceBuf, selected: &DeviceBuf, n_tok: u32, n_selected: u32, cache_cap: u32, n_head: u32, kv_lora_dim: u32, qk_nope: u32, qk_rope: u32, value_dim: u32, r: &RopeCfg, kvq: u32) -> Result {
+    pub fn mla_attention(
+        heads: &mut DeviceBuf,
+        q: &DeviceBuf,
+        qk_low: &DeviceBuf,
+        kv_lora_cache: &DeviceBuf,
+        k_rope_cache: &DeviceBuf,
+        v_b: &DeviceBuf,
+        selected: &DeviceBuf,
+        n_tok: u32,
+        n_selected: u32,
+        cache_cap: u32,
+        n_head: u32,
+        kv_lora_dim: u32,
+        qk_nope: u32,
+        qk_rope: u32,
+        value_dim: u32,
+        r: &RopeCfg,
+        kvq: u32,
+    ) -> Result {
         check(
             unsafe {
-                pulsar_mla_attention(heads.ptr_mut(), q.ptr(), qk_low.ptr(), kv_lora_cache.ptr(), k_rope_cache.ptr(), v_b.ptr(), selected.ptr(), n_tok, n_selected, cache_cap, n_head, kv_lora_dim, qk_nope, qk_rope, value_dim, r.n_ctx_orig, r.freq_base, r.freq_scale, r.ext_factor, r.attn_factor, r.beta_fast, r.beta_slow, r.kq_mult, kvq)
+                pulsar_mla_attention(
+                    heads.ptr_mut(),
+                    q.ptr(),
+                    qk_low.ptr(),
+                    kv_lora_cache.ptr(),
+                    k_rope_cache.ptr(),
+                    v_b.ptr(),
+                    selected.ptr(),
+                    n_tok,
+                    n_selected,
+                    cache_cap,
+                    n_head,
+                    kv_lora_dim,
+                    qk_nope,
+                    qk_rope,
+                    value_dim,
+                    r.n_ctx_orig,
+                    r.freq_base,
+                    r.freq_scale,
+                    r.ext_factor,
+                    r.attn_factor,
+                    r.beta_fast,
+                    r.beta_slow,
+                    r.kq_mult,
+                    kvq,
+                )
             },
             "mla_attention",
         )

@@ -44,7 +44,10 @@ fn main() {
     for b in 0..ne / 256 {
         hostq.extend_from_slice(&xq.d[b].to_le_bytes());
         hostq.extend_from_slice(kernels::as_bytes(
-            &xq.qs[b * 256..(b + 1) * 256].iter().map(|&v| v).collect::<Vec<i8>>(),
+            &xq.qs[b * 256..(b + 1) * 256]
+                .iter()
+                .map(|&v| v)
+                .collect::<Vec<i8>>(),
         ));
         for g in 0..16 {
             hostq.extend_from_slice(&(xq.bsums[b * 16 + g] as i16).to_le_bytes());

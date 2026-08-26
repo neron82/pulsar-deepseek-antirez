@@ -22,8 +22,12 @@ fn main() {
     let mut w = kernels::DeviceBuf::alloc(out_dim * in_dim * 4).unwrap();
     let mut out = kernels::DeviceBuf::alloc(out_dim * n_tok * 4).unwrap();
     // fill with deterministic data
-    let xh: Vec<f32> = (0..in_dim * n_tok).map(|i| ((i * 2654435761) % 1000) as f32 / 1000.0 - 0.5).collect();
-    let wh: Vec<f32> = (0..out_dim * in_dim).map(|i| ((i * 40503) % 1000) as f32 / 1000.0 - 0.5).collect();
+    let xh: Vec<f32> = (0..in_dim * n_tok)
+        .map(|i| ((i * 2654435761) % 1000) as f32 / 1000.0 - 0.5)
+        .collect();
+    let wh: Vec<f32> = (0..out_dim * in_dim)
+        .map(|i| ((i * 40503) % 1000) as f32 / 1000.0 - 0.5)
+        .collect();
     x.write(0, kernels::as_bytes(&xh)).unwrap();
     w.write(0, kernels::as_bytes(&wh)).unwrap();
 
@@ -39,7 +43,9 @@ fn main() {
             }
             kernels::sync().unwrap();
             let dt = t.elapsed().as_secs_f64();
-            if dt < best { best = dt; }
+            if dt < best {
+                best = dt;
+            }
             best_gflop = 2.0 * id as f64 * od as f64 * nt as f64 / 1e9;
         }
         let topts = best_gflop / best / 1000.0; // GFLOP/s -> TFLOP/s
@@ -55,5 +61,13 @@ fn main() {
     kernels::matmul_f32(&mut so, &sw, &small, 128, 8, 8).unwrap();
     kernels::sync().unwrap();
     let vals = so.read_f32(64).unwrap();
-    println!("sanity matmul_f32[0]={:.4} (expected ~{:.4})", vals[0], (0..128).map(|i| i as f32 * 0.001 * i as f32 * 0.001).sum::<f32>() * 8.0 / 128.0);
+    println!(
+        "sanity matmul_f32[0]={:.4} (expected ~{:.4})",
+        vals[0],
+        (0..128)
+            .map(|i| i as f32 * 0.001 * i as f32 * 0.001)
+            .sum::<f32>()
+            * 8.0
+            / 128.0
+    );
 }

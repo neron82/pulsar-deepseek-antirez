@@ -138,7 +138,12 @@ fn now_hms_utc() -> String {
         .map(|d| d.as_secs())
         .unwrap_or(0);
     let d = secs % 86_400;
-    format!("{:02}:{:02}:{:02}", (d / 3600) % 24, (d % 3600) / 60, d % 60)
+    format!(
+        "{:02}:{:02}:{:02}",
+        (d / 3600) % 24,
+        (d % 3600) / 60,
+        d % 60
+    )
 }
 
 /// Synchronous facade over the async rmcp clients. Every public method is
@@ -191,7 +196,13 @@ impl McpHub {
 
     /// Connect every configured server (best-effort; failures land in Conn::error).
     pub fn connect_all(&self) {
-        let names: Vec<String> = self.conns.lock().unwrap().iter().map(|c| c.name.clone()).collect();
+        let names: Vec<String> = self
+            .conns
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|c| c.name.clone())
+            .collect();
         for name in names {
             self.connect_one(&name);
         }
@@ -213,7 +224,11 @@ impl McpHub {
             c.connect_ms = None;
             c.cfg.clone()
         };
-        self.push_log(name, true, &format!("connecting via {}", cfg.transport_kind()));
+        self.push_log(
+            name,
+            true,
+            &format!("connecting via {}", cfg.transport_kind()),
+        );
         if cfg.disabled() {
             {
                 let mut conns = self.conns.lock().unwrap();
@@ -227,7 +242,9 @@ impl McpHub {
         let started = Instant::now();
         let res = self.rt.block_on(async {
             match &cfg {
-                McpServerCfg::Stdio { command, args, env, .. } => {
+                McpServerCfg::Stdio {
+                    command, args, env, ..
+                } => {
                     // ConfigureCommandExt::configure takes self by value and
                     // returns the configured Self; chain it so cmd stays owned.
                     let cmd = Command::new(command).configure(|c| {
@@ -312,7 +329,11 @@ impl McpHub {
             Err(e) => {
                 let msg = e;
                 self.set_err(name, msg.clone());
-                self.push_log(name, false, &format!("handshake failed in {connect_ms}ms: {msg}"));
+                self.push_log(
+                    name,
+                    false,
+                    &format!("handshake failed in {connect_ms}ms: {msg}"),
+                );
             }
         }
     }
@@ -320,7 +341,11 @@ impl McpHub {
     /// Append a log line to the named server (newest last, capped at LOG_CAP).
     /// Re-locks `conns`; callers MUST drop their lock guard before calling.
     fn push_log(&self, name: &str, ok: bool, msg: &str) {
-        let entry = LogEntry { t: now_hms_utc(), ok, msg: msg.into() };
+        let entry = LogEntry {
+            t: now_hms_utc(),
+            ok,
+            msg: msg.into(),
+        };
         let mut conns = self.conns.lock().unwrap();
         if let Some(c) = conns.iter_mut().find(|c| c.name == name) {
             c.logs.push(entry);
@@ -398,9 +423,9 @@ impl McpHub {
             p.arguments = Some(arg_map);
             p
         };
-        let result = self.rt.block_on(async move {
-            tokio::time::timeout(timeout, client.call_tool(params)).await
-        });
+        let result = self
+            .rt
+            .block_on(async move { tokio::time::timeout(timeout, client.call_tool(params)).await });
         match result {
             Ok(Ok(r)) => render_result(&r),
             Ok(Err(e)) => format!("error: {namespaced} call failed: {e}"),
