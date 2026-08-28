@@ -5,7 +5,6 @@
  *   Copyright (c) 2026 The ds4.c authors
  *   Copyright (c) 2023-2026 The ggml authors
  * The MoE dequant functors below are ports of ds4's ds4_cuda_glm_moe.inc
- * (itself a port of metal/moe.metal), same license and attribution.
  * The shim below provides the minimal glue the .inc expects (a tensor is
  * a device pointer plus a byte count) so the kernels build standalone.
  */
@@ -382,10 +381,12 @@ __device__ __forceinline__ static void mma_s8_16x8x32(
 }
 #endif
 
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 800
 __device__ __forceinline__ static float f16_bytes_to_f32(const unsigned char *p) {
     unsigned short h = (unsigned short)(p[0] | (p[1] << 8));
     return __half2float(__ushort_as_half(h));
 }
+#endif
 
 __global__ static void matmul_q8_0_preq_mma_kernel(
         float *out,
@@ -1392,6 +1393,49 @@ extern "C" int pulsar_quantize_q8_K(
     q8_K_quantize_kernel<<<grid, 256>>>(
             (block_q8_K *)out_dev, (const float *)x_dev, in_dim, n_rows);
     return cuda_ok(cudaGetLastError(), "q8_K quantize launch");
+}
+
+/* Pack f32 rows into the GGML q8_0 activation format. IQ4_NL and Q8_0
+ * weights both select q8_0 as their activation type in GGML, unlike the
+ * K-quants and IQ3XXS paths above which consume q8_K. */
+__global__ static void q8_0_pack_kernel(
+        q8_0_block *out, const float *x, uint32_t in_dim, uint32_t n_rows) {
+    const uint32_t block = blockIdx.x;
+    const uint32_t row = blockIdx.y;
+    const uint32_t n_blocks = (in_dim + 31u) / 32u;
+    if (block >= n_blocks || row >= n_rows) return;
+    const uint32_t base = block * 32u;
+    const uint32_t n = min(32u, in_dim - base);
+    const float *src = x + (uint64_t)row * in_dim + base;
+    __shared__ float absval[32];
+    float v = threadIdx.x < n ? src[threadIdx.x] : 0.0f;
+    absval[threadIdx.x] = fabsf(v);
+    __syncthreads();
+    for (uint32_t stride = 16u; stride > 0; stride >>= 1u) {
+        if (threadIdx.x < stride) {
+            absval[threadIdx.x] = fmaxf(absval[threadIdx.x], absval[threadIdx.x + stride]);
+        }
+        __syncthreads();
+    }
+    q8_0_block *dst = out + (uint64_t)row * n_blocks + block;
+    const float d = absval[0] == 0.0f ? 0.0f : absval[0] / 127.0f;
+    if (threadIdx.x == 0) {
+        dst->scale_f16 = __half_as_ushort(__float2half_rn(d));
+    }
+    const float id = d == 0.0f ? 0.0f : 1.0f / d;
+    if (threadIdx.x < 32u) {
+        const int q = threadIdx.x < n ? (int)lrintf(src[threadIdx.x] * id) : 0;
+        dst->q[threadIdx.x] = (int8_t)max(-128, min(127, q));
+    }
+}
+
+extern "C" int pulsar_quantize_q8_0(
+        void *out_dev, const void *x_dev, uint32_t in_dim, uint32_t n_rows) {
+    if (!out_dev || !x_dev || in_dim == 0 || n_rows == 0) return 0;
+    dim3 grid((in_dim + 31u) / 32u, n_rows, 1);
+    q8_0_pack_kernel<<<grid, 32>>>(
+            (q8_0_block *)out_dev, (const float *)x_dev, in_dim, n_rows);
+    return cuda_ok(cudaGetLastError(), "q8_0 pack launch");
 }
 
 __device__ __forceinline__ static uint32_t dev_unpack_iq2_signs(uint32_t v) {
@@ -3781,6 +3825,7 @@ extern "C" int pulsar_moe_down(
         moe_down_kernel<dot_q8_0><<<grid, block>>>(
                 (float *)out_dev, (const pulsar_expert_ptrs *)ptrs_dev,
                 (const block_q8_K *)midq_dev, mid_blocks, out_dim, n_used,
+
                 n_tok, row_bytes, (const float *)ext_dev);
         break;
     case PULSAR_QUANT_IQ4_XS:
@@ -3823,6 +3868,186 @@ extern "C" int pulsar_moe_down(
         return 0;
     }
     return cuda_ok(cudaGetLastError(), "moe down launch");
+}
+__device__ static float dev_dot_q8_0_q8_0_block(
+        const q8_0_block *x, const q8_0_block *y) {
+    int sum = 0;
+    for (int i = 0; i < 32; i += 4) {
+        sum = __dp4a(
+                load_i8x4_i32_unaligned(x->q + i),
+                load_i8x4_i32_unaligned(y->q + i),
+                sum);
+    }
+    return f16_to_f32(x->scale_f16) * f16_to_f32(y->scale_f16) * (float)sum;
+}
+
+__device__ static float dev_dot_iq4_nl_q8_0_block(
+        const block_iq4_nl *x, const q8_0_block *y) {
+    int sum_lo = 0;
+    int sum_hi = 0;
+    for (int i = 0; i < 16; i += 4) {
+        uint32_t packed;
+        memcpy(&packed, x->qs + i, 4);
+        sum_lo = __dp4a(
+                iq4nl_lut4(packed & 0x0f0f0f0fu),
+                load_i8x4_i32_unaligned(y->q + i),
+                sum_lo);
+        sum_hi = __dp4a(
+                iq4nl_lut4((packed >> 4) & 0x0f0f0f0fu),
+                load_i8x4_i32_unaligned(y->q + 16 + i),
+                sum_hi);
+    }
+    return f16_to_f32(x->d) * f16_to_f32(y->scale_f16) *
+           (float)(sum_lo + sum_hi);
+}
+
+__global__ static void moe_down_q8_0_kernel(
+        float *out,
+        const pulsar_expert_ptrs *ptrs,
+        const q8_0_block *midq,
+        uint32_t mid_blocks,
+        uint32_t out_dim,
+        uint32_t n_used,
+        uint32_t n_tok,
+        uint64_t row_bytes,
+        uint32_t quant,
+        const float *ext) {
+    const uint32_t lane = threadIdx.x;
+    const uint32_t row = blockIdx.x * blockDim.y + threadIdx.y;
+    const uint32_t token = blockIdx.y;
+    if (row >= out_dim || token >= n_tok) return;
+    const uint64_t slot_base = (uint64_t)token * n_used;
+    float acc = 0.0f;
+    for (uint32_t slot = 0; slot < n_used; ++slot) {
+        const uint64_t si = slot_base + slot;
+        const pulsar_expert_ptrs p = ptrs[si];
+        if (!p.down) {
+            if (ext) acc += ext[si * out_dim + row];
+            continue;
+        }
+        const char *down_row = (const char *)p.down + (uint64_t)row * row_bytes;
+        const q8_0_block *slot_midq = midq + si * mid_blocks;
+        float part = 0.0f;
+        for (uint32_t b = lane; b < mid_blocks; b += 32u) {
+            if (quant == PULSAR_QUANT_Q8_0) {
+                part += dev_dot_q8_0_q8_0_block(
+                        (const q8_0_block *)down_row + b,
+                        slot_midq + b);
+            } else {
+                part += dev_dot_iq4_nl_q8_0_block(
+                        (const block_iq4_nl *)(down_row + (uint64_t)b * sizeof(block_iq4_nl)),
+                        slot_midq + b);
+            }
+        }
+        #pragma unroll
+        for (uint32_t mask = 16u; mask > 0u; mask >>= 1u) {
+            part += __shfl_xor_sync(0xffffffffu, part, mask);
+        }
+        acc += part;
+    }
+    if (lane == 0) out[(uint64_t)token * out_dim + row] = acc;
+}
+
+__global__ static void moe_down_q8_0_per_slot_kernel(
+        float *out,
+        const pulsar_expert_ptrs *ptrs,
+        const q8_0_block *midq,
+        uint32_t mid_blocks,
+        uint32_t out_dim,
+        uint32_t n_used,
+        uint32_t n_tok,
+        uint64_t row_bytes,
+        uint32_t quant) {
+    const uint32_t lane = threadIdx.x;
+    const uint32_t row = blockIdx.x * blockDim.y + threadIdx.y;
+    const uint32_t si = blockIdx.y;
+    if (row >= out_dim || si >= n_tok * n_used) return;
+    const pulsar_expert_ptrs p = ptrs[si];
+    float part = 0.0f;
+    if (p.down) {
+        const char *down_row = (const char *)p.down + (uint64_t)row * row_bytes;
+        const q8_0_block *slot_midq = midq + (uint64_t)si * mid_blocks;
+        for (uint32_t b = lane; b < mid_blocks; b += 32u) {
+            if (quant == PULSAR_QUANT_Q8_0) {
+                part += dev_dot_q8_0_q8_0_block(
+                        (const q8_0_block *)down_row + b,
+                        slot_midq + b);
+            } else {
+                part += dev_dot_iq4_nl_q8_0_block(
+                        (const block_iq4_nl *)(down_row + (uint64_t)b * sizeof(block_iq4_nl)),
+                        slot_midq + b);
+            }
+        }
+        #pragma unroll
+        for (uint32_t mask = 16u; mask > 0u; mask >>= 1u) {
+            part += __shfl_xor_sync(0xffffffffu, part, mask);
+        }
+    }
+    if (lane == 0) out[(uint64_t)si * out_dim + row] = part;
+}
+
+extern "C" int pulsar_moe_down_q8_0(
+        void *out_dev,
+        const void *ptrs_dev,
+        const void *midq_dev,
+        uint32_t mid_dim,
+        uint32_t out_dim,
+        uint32_t n_used,
+        uint32_t n_tok,
+        uint64_t row_bytes,
+        uint32_t quant,
+        const void *ext_dev) {
+    if (!out_dev || !ptrs_dev || !midq_dev || mid_dim == 0 || out_dim == 0 ||
+        n_used == 0 || n_tok == 0 || row_bytes == 0 ||
+        (quant != PULSAR_QUANT_Q8_0 && quant != PULSAR_QUANT_IQ4_NL)) {
+        return 0;
+    }
+    const uint32_t mid_blocks = (mid_dim + 31u) / 32u;
+    dim3 block(32, 4, 1);
+    dim3 grid((out_dim + 3u) / 4u, n_tok, 1);
+    moe_down_q8_0_kernel<<<grid, block>>>(
+            (float *)out_dev,
+            (const pulsar_expert_ptrs *)ptrs_dev,
+            (const q8_0_block *)midq_dev,
+            mid_blocks,
+            out_dim,
+            n_used,
+            n_tok,
+            row_bytes,
+            quant,
+            (const float *)ext_dev);
+    return cuda_ok(cudaGetLastError(), "moe down q8_0 launch");
+}
+
+extern "C" int pulsar_moe_down_q8_0_per_slot(
+        void *out_dev,
+        const void *ptrs_dev,
+        const void *midq_dev,
+        uint32_t mid_dim,
+        uint32_t out_dim,
+        uint32_t n_used,
+        uint32_t n_tok,
+        uint64_t row_bytes,
+        uint32_t quant) {
+    if (!out_dev || !ptrs_dev || !midq_dev || mid_dim == 0 || out_dim == 0 ||
+        n_used == 0 || n_tok == 0 || row_bytes == 0 ||
+        (quant != PULSAR_QUANT_Q8_0 && quant != PULSAR_QUANT_IQ4_NL)) {
+        return 0;
+    }
+    const uint32_t mid_blocks = (mid_dim + 31u) / 32u;
+    dim3 block(32, 4, 1);
+    dim3 grid((out_dim + 3u) / 4u, n_tok * n_used, 1);
+    moe_down_q8_0_per_slot_kernel<<<grid, block>>>(
+            (float *)out_dev,
+            (const pulsar_expert_ptrs *)ptrs_dev,
+            (const q8_0_block *)midq_dev,
+            mid_blocks,
+            out_dim,
+            n_used,
+            n_tok,
+            row_bytes,
+            quant);
+    return cuda_ok(cudaGetLastError(), "moe down q8_0 per-slot launch");
 }
 extern "C" int pulsar_moe_down_per_slot(
         void *out_dev,             /* f32 [n_tok][n_used][out_dim] */
@@ -5960,5 +6185,6 @@ extern "C" int pulsar_mla_selftest(void) {
 #include "dsa_indexer.inc"
 #include "dsv4_kernels.inc"
 #include "qwen35_kernels.inc"
+#include "qwen38_kernels.inc"
 #include "k3_kernels.inc"
 #include "bailing_kernels.inc"

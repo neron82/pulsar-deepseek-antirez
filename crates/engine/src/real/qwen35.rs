@@ -702,7 +702,6 @@ pub struct DraftModel {
     n_kv: u32,
     head_dim: u32,
     rope: kernels::RopeCfg,
-    n_embd: u32,
     ff: u32,
     // scratch
     feat_in: DeviceBuf, // [RING_CAP][n_capture*n_embd] window gather
@@ -879,7 +878,6 @@ impl DraftModel {
             n_kv,
             head_dim,
             rope,
-            n_embd,
             ff,
             feat_in: f32s(RING_CAP * n_cap * n_embd as usize)?,
             feat: f32s(RING_CAP * n_embd as usize)?,
@@ -1042,7 +1040,7 @@ impl Model {
         kernels::rms_norm(
             &mut st.normed,
             &st.last_row,
-            &self.output_norm,
+            self.output_norm.as_ref().ok_or("output_norm missing")?,
             s.n_embd,
             k,
             s.rms_eps,

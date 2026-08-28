@@ -7,6 +7,7 @@ fn main() {
     // served stale PTX after in-place kernel edits. Track each file.
     println!("cargo:rerun-if-changed=cuda/pulsar_kernels.cu");
     println!("cargo:rerun-if-changed=cuda/bailing_kernels.inc");
+    println!("cargo:rerun-if-changed=cuda/qwen38_kernels.inc");
     // One fatbin for every NVIDIA generation the kernels can serve. The
     // floor is dp4a = sm_61 (Pascal / GTX 10-series); nothing newer is
     // required (no tensor cores, no async-copy, static <=48KB shared).
@@ -40,11 +41,30 @@ fn main() {
     if let Some(ccbin) = pick_ccbin() {
         build.flag(&format!("-ccbin={ccbin}"));
     }
-    let list: Vec<&str> = archs
+    let raw: Vec<&str> = archs
         .split(',')
         .map(str::trim)
         .filter(|s| !s.is_empty())
         .collect();
+    // CUDA 13 dropped Pascal (sm_61), so the historical default list can
+    // name an arch the active toolkit rejects. Probe each requested arch
+    // with a trivial compile and keep only what builds, so the default
+    // works across CUDA versions instead of hard-erroring on one entry.
+    let list: Vec<&str> = raw
+        .iter()
+        .filter(|a| {
+            let ok = probe_arch(a);
+            if !ok {
+                eprintln!("build.rs: CUDA toolkit rejects arch {a} - skipping");
+            }
+            ok
+        })
+        .copied()
+        .collect();
+    if list.is_empty() {
+        eprintln!("build.rs: no supported CUDA arch in {archs:?}");
+        std::process::exit(1);
+    }
     for (i, a) in list.iter().enumerate() {
         let first = i == 0;
         let last = i + 1 == list.len();
@@ -62,6 +82,29 @@ fn main() {
         .compile("pulsar_kernels");
     println!("cargo:rustc-link-lib=cudart");
     println!("cargo:rustc-link-search=native=/usr/local/cuda/lib64");
+}
+
+/// Trivial nvcc compile to learn whether this toolkit still supports the
+/// arch (CUDA 13 dropped sm_61, so the default list must adapt at build
+/// time rather than assume the historical floor).
+fn probe_arch(arch: &str) -> bool {
+    let out = match std::env::var("OUT_DIR") {
+        Ok(p) => p,
+        Err(_) => return true, // no scratch dir: keep it, let the real build report
+    };
+    let probe = format!("{out}/arch_probe_{arch}.cu");
+    if std::fs::write(&probe, "extern \"C\" __global__ void pulsar_arch_probe() {}\n").is_err() {
+        return true;
+    }
+    std::process::Command::new("nvcc")
+        .arg("-c")
+        .arg(&probe)
+        .arg("-o")
+        .arg(format!("{out}/arch_probe_{arch}.o"))
+        .arg(format!("-gencode=arch=compute_{arch},code=sm_{arch}"))
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
 }
 
 fn pick_ccbin() -> Option<String> {

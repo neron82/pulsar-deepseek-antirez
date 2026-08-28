@@ -25,6 +25,7 @@ mod real {
     mod bailing;
     mod dsv4;
     mod k3;
+    mod qwen38;
     mod qwen35;
     pub use qwen35::{generate_dflash, DraftModel};
 
@@ -74,8 +75,16 @@ mod real {
         /// MLA applies real RoPE and a per-head output gate. Decode-only;
         /// prefill loops tokens (the KDA recurrence is sequential).
         Bailing,
-    }
+        /// Qwen3.8-Flash-Next (qwen4exp): hyper-connection residual
+        /// streams (low-rank mixer, replaces every layer norm AND the
+        /// output norm), Gated DeltaNet with a SIGMOID (not silu) output
+        /// gate on 3 of 4 layers, block-sparse indexer attention (QSA)
+        /// on full-attn layers, a PLE n-gram hash embedding on layer 1,
+        /// and a 512-expert softmax-router MoE. Decode-only graph;
+        /// prefill loops tokens (GDN/conv/PLE recurrences are sequential).
+        Qwen38,
 
+    }
     #[derive(Debug, Clone, Copy)]
     pub struct Shape {
         pub family: Family,
@@ -168,6 +177,26 @@ mod real {
         /// the shared-expert count (2 x 3072 = 6144), matching the fused
         /// ffn_*_shexp tensors; elsewhere it falls back to n_ff_exp.
         pub n_ff_shexp: u32,
+        // qwen38/qwen4exp (zero elsewhere)
+        /// hyper_connection.low_rank: HC mixer down/up width.
+        pub hc_low_rank: u32,
+        /// QSA indexer block size (compress_ratios on full-attn layers).
+        /// Zero disables the sparse path (dense attention).
+        pub qsa_ratio: u32,
+        /// PLE n-gram hash embedding geometry (zeros disable it).
+        pub ple_ngram: u32,
+        pub ple_heads_per_ngram: u32,
+        pub ple_conv_k: u32,
+        pub ple_eos_tok: u32,
+        pub ple_img_tok: u32,
+        /// Layer index carrying the PLE block (-1 = none).
+        pub ple_layer: i32,
+        pub ple_mult: [u64; 3],
+        pub ple_offs: [u64; 16],
+        pub ple_vocab: [u64; 16],
+        /// PLE per-layer embedding width (embedding_length_per_layer_input,
+        /// 160 on this model); zero when PLE is absent
+        pub ple_head_dim: u32,
     }
 
     impl Shape {
@@ -178,7 +207,9 @@ mod real {
         /// Attention output width (input of attn_output).
         fn heads_dim(&self) -> u32 {
             match self.family {
-                Family::Gqa | Family::Dsv4 | Family::Qwen35 => self.n_head * self.head_dim,
+                Family::Gqa | Family::Dsv4 | Family::Qwen35 | Family::Qwen38 => {
+                    self.n_head * self.head_dim
+                }
                 // K3's two layer flavours agree here: the MLA half is
                 // n_head * value_mla and the KDA half n_head *
                 // kda_head_dim, both 12288, which is why one attn_output
@@ -285,6 +316,9 @@ mod real {
                 Some("qwen35") => Family::Qwen35,
                 // Kimi-K3 2.8T: hybrid KDA/MLA + AttnRes + latent MoE
                 Some("kimi-k3") => Family::K3,
+                // Qwen3.8-Flash-Next (qwen4exp): HC residual streams +
+                // GDN(sigmoid gate) hybrid + QSA indexer attention
+                Some("qwen4exp") => Family::Qwen38,
                 other => return Err(format!("unsupported architecture {other:?}").into()),
             };
             let inkling = g.architecture() == Some("inkling");
@@ -376,7 +410,7 @@ mod real {
                 n_ff_dense: match family {
                     // note: or_else, not unwrap_or - the eager fallback
                     // arg would ? on files that only ship the plain key
-                    Family::Dsv4 | Family::Qwen35 => {
+                    Family::Dsv4 | Family::Qwen35 | Family::Qwen38 => {
                         u("feed_forward_length").or_else(|_| u("expert_feed_forward_length"))?
                     }
                     _ => u("feed_forward_length")?,
@@ -390,6 +424,7 @@ mod real {
                 router_softmax: matches!(
                     g.architecture(),
                     Some("qwen3moe") | Some("gemma4") | Some("qwen35moe") | Some("gpt-oss")
+                        | Some("qwen4exp")
                 ),
                 n_expert_groups: 0,
                 n_group_used: 0,
@@ -452,6 +487,18 @@ mod real {
                 n_expert_latent: 0,
                 attn_res_block: 0,
                 n_ff_shexp: 0,
+                hc_low_rank: 0,
+                qsa_ratio: 0,
+                ple_ngram: 0,
+                ple_heads_per_ngram: 0,
+                ple_conv_k: 0,
+                ple_eos_tok: 0,
+                ple_img_tok: 0,
+                ple_layer: -1,
+                ple_mult: [0; 3],
+                ple_offs: [0; 16],
+                ple_vocab: [0; 16],
+                ple_head_dim: 0,
             };
             if g.architecture() == Some("laguna") {
                 // laguna ships real YaRN (factor 32 over an 8192 native
@@ -590,6 +637,67 @@ mod real {
                     _ => 10.0,
                 };
             }
+            if family == Family::Qwen38 {
+                s.rot_dim = u("rope.dimension_count")?;
+                s.ssm_conv_k = u("ssm.conv_kernel")?;
+                s.ssm_state = u("ssm.state_size")?;
+                s.ssm_k_heads = u("ssm.group_count")?;
+                s.ssm_v_heads = u("ssm.time_step_rank")?;
+                s.ssm_inner = u("ssm.inner_size")?;
+                s.full_attn_interval = u("full_attention_interval").unwrap_or(4);
+                // hyper connections
+                s.n_hc = u("hyper_connection.count")?;
+                s.hc_low_rank = u("hyper_connection.low_rank")?;
+                // QSA indexer (block-sparse attention on full-attn layers)
+                s.n_idx_head = u("attention.indexer.head_count")?;
+                s.n_idx_dim = u("attention.indexer.key_length")?;
+                s.n_idx_topk = u("attention.indexer.top_k")?;
+                s.qsa_ratio = match g.arch_meta("attention.compress_ratios") {
+                    Some(Value::Array(a)) => a
+                        .iter()
+                        .filter_map(Value::as_u64)
+                        .max()
+                        .unwrap_or(0) as u32,
+                    _ => 0,
+                };
+                // PLE n-gram hash embedding (single layer in this lineup;
+                // parse the arrays defensively and only enable the first
+                // listed layer)
+                let ple_layers: Vec<u64> = match g.arch_meta("ple.layers") {
+                    Some(Value::Array(a)) => a.iter().filter_map(Value::as_u64).collect(),
+                    _ => Vec::new(),
+                };
+                if !ple_layers.is_empty() {
+                    s.ple_layer = ple_layers[0] as i32;
+                    s.ple_ngram = u("ple.ngram_size")?;
+                    s.ple_heads_per_ngram = u("ple.heads_per_ngram")?;
+                    s.ple_conv_k = u("ple.conv_kernel")?;
+                    s.ple_eos_tok = u("ple.eos_token_id")?;
+                    s.ple_img_tok = u("ple.image_token_id").unwrap_or(0);
+                    // [160, ~320M] table row width = the per-layer embedding
+                    s.ple_head_dim = u("embedding_length_per_layer_input")?;
+                    let arr64 = |k: &str| -> Result<Vec<u64>> {
+                        Ok(match g.arch_meta(k) {
+                            Some(Value::Array(a)) => {
+                                a.iter().filter_map(Value::as_u64).collect()
+                            }
+                            _ => return Err(meta_err(k)),
+                        })
+                    };
+                    let mults = arr64("ple.layer_multipliers")?;
+                    for (i, v) in mults.iter().take(3).enumerate() {
+                        s.ple_mult[i] = *v;
+                    }
+                    let offs = arr64("ple.head_offsets")?;
+                    for (i, v) in offs.iter().take(16).enumerate() {
+                        s.ple_offs[i] = *v;
+                    }
+                    let vocabs = arr64("ple.head_vocab_sizes")?;
+                    for (i, v) in vocabs.iter().take(16).enumerate() {
+                        s.ple_vocab[i] = *v;
+                    }
+                }
+            }
             Ok(s)
         }
     }
@@ -659,11 +767,21 @@ mod real {
         (p as *const u8).wrapping_add(off as usize) as *const std::ffi::c_void
     }
 
+
     /// A resident K-quant matmul weight (matmul_kq path).
     struct KqW {
         w: DeviceBuf,
         row_bytes: u64,
         quant: u32,
+    }
+    impl KqW {
+        /// Dequantized q8_0 view for slots that require the dense layout.
+        /// K-quants do not have one; caller sites choose upload() first, so
+        /// this arm only exists for type completeness and panics loudly
+        /// rather than misreading bytes.
+        fn into_q8_bytes(self) -> DeviceBuf {
+            panic!("KqW::into_q8_bytes: requant path not implemented - use upload() for this tensor");
+        }
     }
 
     /// A matmul weight in whichever encoding the file made cheap to run:
@@ -688,6 +806,16 @@ mod real {
                 Ok(MatW::Kq(upload_kq(file, g, name)?))
             } else {
                 Ok(MatW::Q8(upload(file, g, name)?))
+            }
+        }
+
+        /// Flatten to the raw q8_0 buffer (weight slots that always
+        /// contract against f32 activations - qwen38 HC/PLE projections).
+        /// A K-quant here would be wrong-layout; convert eagerly instead.
+        fn into_q8(self) -> DeviceBuf {
+            match self {
+                MatW::Q8(b) => b,
+                MatW::Kq(k) => k.into_q8_bytes(),
             }
         }
     }
@@ -817,6 +945,7 @@ mod real {
         Qwen35(Box<Qwen35W>),
         K3(Box<K3W>),
         Bailing(Box<BailingW>),
+        Qwen38(Box<Qwen38W>),
     }
 
     /// qwen35moe per-layer stack: exactly one of attn/gdn is Some.
@@ -970,6 +1099,76 @@ mod real {
         ssm_out: MatW,       // [value_dim -> n_embd]
     }
 
+    /// Qwen3.8 (qwen4exp) per-layer stack: hyper-connection mixers on both
+    /// sides plus exactly one of attn/gdn, like qwen35. The MoE half
+    /// reuses Ffn::Moe (softmax router); LayerW.attn_norm/ffn_norm stay
+    /// unused dummies (HC replaces both layer norms).
+    struct Qwen38W {
+        gdn: Option<Qwen38Gdn>,
+        attn: Option<Qwen38Attn>,
+        hc_attn: Qwen38Hc,
+        hc_ffn: Qwen38Hc,
+        /// shared-expert scalar gate weight, f32 [n_embd -> 1]
+        shexp_gate: DeviceBuf,
+        /// PLE n-gram hash embedding weights; only the layer named by
+        /// shape.ple_layer carries these
+        ple: Option<Qwen38Ple>,
+    }
+
+    struct Qwen38Gdn {
+        wqkv: MatW,         // [n_embd -> conv_dim] (10240)
+        wz: MatW,           // [n_embd -> value_dim] (attn_gate)
+        conv: DeviceBuf,    // f32 [conv_dim][ssm_conv_k]
+        alpha_w: DeviceBuf, // f32 [n_embd -> v_heads(48)]
+        beta_w: DeviceBuf,
+        /// g = a * softplus(alpha + dt_bias); a stored as -exp(A_log)
+        a: DeviceBuf,
+        dt_bias: DeviceBuf,
+        ssm_norm: DeviceBuf, // f32 [ssm_state]
+        ssm_out: MatW,       // [value_dim -> n_embd]
+    }
+
+    /// Hyper-connection mixer weights.
+    struct Qwen38Hc {
+        norm: DeviceBuf,   // f32 [hc*n_embd] (converter folded 1 + w)
+        down: MatW,        // [hc_dim -> low_rank]
+        up: MatW,          // [low_rank -> hc_dim]
+        inject: DeviceBuf, // q8_0 [hc_dim -> hc] (head mixer: dummy)
+    }
+
+    struct Qwen38Attn {
+        wq: MatW,       // [n_embd -> 2*n_head*head_dim] fused [q|gate]
+        wk: MatW,
+        wv: MatW,
+        out: MatW,
+        q_norm: DeviceBuf,
+        k_norm: DeviceBuf,
+        /// QSA indexer projections, f32-converted from bf16 at load.
+        has_indexer: bool,
+        /// Dense-only v1 serves the provably-dense window; the block-
+        /// sparse QSA path (next feature) will consume these.
+        #[allow(dead_code)]
+        idx_q_b: DeviceBuf, // [n_embd -> n_idx_head*n_idx_dim]
+        #[allow(dead_code)]
+        idx_k_b: DeviceBuf, // [n_embd -> n_idx_dim]
+        #[allow(dead_code)]
+        idx_q_norm: DeviceBuf,
+        #[allow(dead_code)]
+        idx_k_norm: DeviceBuf,
+    }
+
+    /// PLE hash-embedding block weights. The token table itself
+    /// ([160 x ~320M] IQ4NL) stays HOST-resident (26.8 GiB) and gathers
+    /// run against an mmap'd window - see load_qwen38_ple.
+    struct Qwen38Ple {
+        ple_key: DeviceBuf,   // q8_0 [n_embd -> hc_dim]
+        ple_value: DeviceBuf, // q8_0 [n_embd -> n_embd]
+        norm_key: DeviceBuf,  // f32 [hc_dim]
+        norm_query: DeviceBuf,
+        norm_conv: DeviceBuf,
+        conv1d: DeviceBuf, // f32 [ple_conv_k][hc_dim]
+    }
+
     /// deepseek4 per-layer stack: V4 attention, hyper-connection
     /// controls, streaming compressor, indexer, and the host-router
     /// extras. The MoE half reuses Ffn::Moe (LayerW.attn_output = the
@@ -1070,6 +1269,21 @@ mod real {
         /// residency didn't fit, resolve falls back to the caches.
         res_pool: DeviceBuf,
         res_map: std::collections::HashMap<u64, usize>,
+        /// Sidecar file kept open: the draft layer's expert slabs live in
+        /// the sidecar's address space (their absolute offsets collide
+        /// with the trunk's PLE table), so when residency didn't fit they
+        /// stream from here instead of the trunk store. None = the nextn
+        /// block sits inside the main file.
+        sidecar: Option<VFile>,
+        /// Absolute offsets of all draft expert slabs (3 x n_expert) -
+        /// the routing key for the sidecar fetch path.
+        sidecar_exp_offs: std::collections::HashSet<u64>,
+        /// The sidecar's own Q8_0 copies of the shared embedding and lm
+        /// head: the oracle runs the draft through the sidecar model, so
+        /// its draft logits used these, not the trunk's lower-precision
+        /// copies. None = fall back to the trunk's.
+        tok_embd: Option<DeviceBuf>,
+        output_w: Option<DeviceBuf>,
     }
 
     pub struct Model {
@@ -1079,7 +1293,12 @@ mod real {
         pub shape: Shape,
         pub gguf: Gguf,
         token_embd: DeviceBuf,
-        output_norm: DeviceBuf,
+        /// Final RMS gamma. qwen4exp carries NONE (its head is an HC
+        /// mixer in `output_hc`), so this is an Option and every
+        /// consumer must prove its family has it.
+        output_norm: Option<DeviceBuf>,
+        /// qwen4exp final hyper-connection mixer (replaces output_norm).
+        output_hc: Option<Qwen38Hc>,
         /// K3 AttnRes: the score vector for the final mix before the head
         output_res_score: Option<DeviceBuf>,
         output: DeviceBuf,
@@ -1182,6 +1401,7 @@ mod real {
     pub enum RecurrentCkpt {
         Dsv4(Vec<dsv4::Dsv4LayerCkpt>),
         Qwen35(Vec<Option<(DeviceBuf, DeviceBuf)>>),
+        Qwen38(Vec<Option<(DeviceBuf, DeviceBuf, Option<DeviceBuf>)>>),
     }
 
     #[derive(Default)]
@@ -1495,6 +1715,8 @@ mod real {
         xq: DeviceBuf,
         mid: DeviceBuf,
         midq: DeviceBuf,
+        /// q8_0 activations for Qwen38 Q8_0/IQ4_NL down experts.
+        midq_q8_0: DeviceBuf,
         out: DeviceBuf,
         /// flat-path per-slot down results ([n_tok][n_used][out_dim],
         /// unsummed) - the primary splices them into its canonical
@@ -1557,8 +1779,6 @@ mod real {
         /// global (touch count, slab len) per requested offset, cached or not
         touch: std::collections::HashMap<u64, (u64, u64)>,
         next_group: u32,
-        /// round-robin victim cursor for the O(1) force-eviction path
-        ring_next: usize,
         pub hits: u64,
         pub misses: u64,
     }
@@ -1581,7 +1801,6 @@ mod real {
                 ungrouped: 0,
                 touch: std::collections::HashMap::new(),
                 next_group: 1,
-                ring_next: 0,
                 hits: 0,
                 misses: 0,
             })
@@ -1625,62 +1844,6 @@ mod real {
             }
         }
 
-        /// Admit gate+up+down as one unit, evicting the coldest NOT-IN-USE
-        /// group unconditionally (no heat comparison). Prefill uses this so
-        /// its working set stays resident across chunks even when the warm
-        /// census filled the pool with higher-heat triples; decode keeps the
-        /// census path (maybe_insert_triple) which preserves the hot set.
-        fn maybe_insert_triple_force(
-            &mut self,
-            parts: &[(u64, &[u8]); 3],
-            in_use: &[u64],
-        ) -> Result<Option<[*const std::ffi::c_void; 3]>> {
-            let mut ptrs = [std::ptr::null(); 3];
-            let mut need: Vec<(usize, u64, &[u8])> = Vec::new();
-            for (i, &(off, payload)) in parts.iter().enumerate() {
-                if let Some(p) = self.map.get(&off).map(|&s| self.slot_ptr(s)) {
-                    ptrs[i] = p;
-                } else {
-                    need.push((i, off, payload));
-                }
-            }
-            if need.is_empty() {
-                return Ok(Some(ptrs));
-            }
-            // free enough slots: round-robin over occupied slots, skipping
-            // in_use, O(1) per victim (no sort). If nothing is evictable,
-            // fall back to None.
-            let n = self.meta.len();
-            let mut scanned = 0;
-            while self.free_list.len() < need.len() && scanned < n {
-                let slot = self.ring_next % n;
-                self.ring_next += 1;
-                scanned += 1;
-                if self.meta[slot].1 != u64::MAX && !in_use.contains(&self.meta[slot].1) {
-                    self.free_group_of(slot as u32);
-                    scanned = 0;
-                }
-            }
-            if self.free_list.len() < need.len() {
-                return Ok(None);
-            }
-            let gid = self.next_group;
-            self.next_group = self.next_group.wrapping_add(1).max(1);
-            for (j, (i, off, payload)) in need.iter().enumerate() {
-                let slot = self
-                    .free_list
-                    .pop()
-                    .ok_or("triple force: free_list empty")?;
-                let base = slot as usize * self.slab_bytes;
-                self.pool.write(base, payload)?;
-                let freq = self.touch.get(off).map(|t| t.0).unwrap_or(0);
-                debug_assert_eq!(self.meta[slot as usize].1, u64::MAX);
-                self.meta[slot as usize] = (freq, *off, gid);
-                self.map.insert(*off, slot);
-                ptrs[*i] = self.slot_ptr(slot);
-            }
-            Ok(Some(ptrs))
-        }
 
         fn get(&mut self, offset: u64, len: u64) -> Option<*const std::ffi::c_void> {
             let t = self.touch.entry(offset).or_insert((0, len));
@@ -1811,7 +1974,7 @@ mod real {
             }
             let gid = self.next_group;
             self.next_group = self.next_group.wrapping_add(1).max(1);
-            for (j, (i, off, payload)) in need.iter().enumerate() {
+            for (_, (i, off, payload)) in need.iter().enumerate() {
                 let slot = self
                     .free_list
                     .pop()
@@ -2269,20 +2432,6 @@ mod real {
                 pool.submit(jobs)
             }
 
-            /// debug: (first mids, per-expert slot weights, expert order)
-            pub fn dbg(&self) -> (Vec<f32>, Vec<Vec<f32>>, Vec<i32>) {
-                let mut order: Vec<(i32, usize)> =
-                    self.idx.iter().map(|(&e, &ci)| (e, ci)).collect();
-                order.sort_by_key(|&(_, ci)| ci);
-                (
-                    self.mids.iter().take(4).copied().collect(),
-                    self.pairs
-                        .iter()
-                        .map(|p| p.iter().map(|x| x.1).collect())
-                        .collect(),
-                    order.into_iter().map(|(e, _)| e).collect(),
-                )
-            }
 
             /// after the stage-A join: quantize mids, run the down-proj
             /// fan-out, return the per-token f32 partial [n_tok * ne]
@@ -2959,6 +3108,49 @@ mod real {
         }
     }
 
+    /// One hyper-connection mixer weight set for qwen4exp: f32 gamma,
+    /// q8_0 down/up projections, and the q8_0 inject matrix (dummy 4
+    /// bytes on the head mixer, which has no inject step).
+    fn load_hc_mix(
+        file: &VFile,
+        g: &Gguf,
+        il: u32,
+        side: &str,
+    ) -> Result<Qwen38Hc> {
+        let pfx = |s: &str| format!("blk.{il}.{side}_{s}");
+        let head = side == "head";
+        Ok(Qwen38Hc {
+            norm: upload(file, g, &pfx("norm.weight"))?,
+            down: MatW::load(file, g, &pfx("down.weight"))?,
+            up: MatW::load(file, g, &pfx("up.weight"))?,
+            // inject ships F32; matmul_f32 consumes it - NOT MatW/q8_0
+            inject: if head {
+                DeviceBuf::alloc(4)?
+            } else {
+                upload_as_f32(file, g, &pfx("inject.weight"))?
+            },
+        })
+    }
+
+    /// PLE block weights (the 26.8 GiB IQ4NL token table is NOT loaded
+    /// here; the host-side gatherer reads it via its own mmap - see
+    /// qwen38.rs PLEPath).
+    fn load_qwen38_ple(
+        file: &VFile,
+        g: &Gguf,
+        il: u32,
+    ) -> Result<Qwen38Ple> {
+        let pfx = |s: &str| format!("blk.{il}.ple_{s}");
+        Ok(Qwen38Ple {
+            ple_key: MatW::load(file, g, &pfx("key.weight"))?.into_q8(),
+            ple_value: MatW::load(file, g, &pfx("value.weight"))?.into_q8(),
+            norm_key: upload(file, g, &pfx("norm_key.weight"))?,
+            norm_query: upload(file, g, &pfx("norm_query.weight"))?,
+            norm_conv: upload(file, g, &pfx("norm_conv.weight"))?,
+            conv1d: upload_as_f32(file, g, &pfx("conv1d.weight"))?,
+        })
+    }
+
     /// f16 tensor -> q8_0 bytes (deepseek4's bigger f16 matmul weights
     /// ride the q8_0 fast path; ~0.4% quantization noise). Q8_0 tensors
     /// pass through (unsloth UD-* ships the compressor/indexer projections
@@ -3048,7 +3240,23 @@ mod real {
                 buf.write(0, &bytes)?;
                 buf
             };
-            let output_norm = upload(&file, &gguf, "output_norm.weight")?;
+            // qwen4exp has no output_norm: the final HC mixer takes that
+            // role (output_hc, below)
+            let output_norm = if gguf.tensor("output_norm.weight").is_some() {
+                Some(upload(&file, &gguf, "output_norm.weight")?)
+            } else {
+                None
+            };
+            let output_hc = if gguf.tensor("output_hc_norm.weight").is_some() {
+                Some(Qwen38Hc {
+                    norm: upload(&file, &gguf, "output_hc_norm.weight")?,
+                    down: MatW::load(&file, &gguf, "output_hc_down.weight")?,
+                    up: MatW::load(&file, &gguf, "output_hc_up.weight")?,
+                    inject: DeviceBuf::alloc(4)?,
+                })
+            } else {
+                None
+            };
             // K3 mixes the banked AttnRes checkpoints one last time before
             // the head; absent on every other family.
             let output_res_score = if gguf.tensor("output_res_score.weight").is_some() {
@@ -3122,7 +3330,7 @@ mod real {
                 },
                 // ponytail: dsv4/qwen35 v1 run everything on the primary;
                 // attn offload comes with the perf pass
-                Family::Dsv4 | Family::Qwen35 => None,
+                Family::Dsv4 | Family::Qwen35 | Family::Qwen38 => None,
             };
             // ---- MLA layer-split planner: per-layer attention ownership.
             // Contiguous layer ranges spread across secondaries in
@@ -3595,6 +3803,9 @@ mod real {
                 // Q4_K over 42 layers: same as K3, let the layer-split
                 // planner place it and do not cap it here.
                 (Family::Bailing, _) => env_budget.unwrap_or(i64::MAX),
+                // qwen38: like qwen35 the non-expert stack is a few GB -
+                // resident on whatever card hosts it
+                (Family::Qwen38, _) => env_budget.unwrap_or(i64::MAX),
             };
             // No-attn-GPU Mla: an oversized budget OOMs the load instead
             // of degrading (measured: 8GB+ on a 16GB primary fails at
@@ -3623,6 +3834,7 @@ mod real {
             let mut no_budget: i64 = if attn_dev.is_some() { i64::MAX } else { 0 };
 
             let dsv4_arch = shape.family == Family::Dsv4;
+            let s_ple_layer: i32 = shape.ple_layer;
             let compress_ratios: Vec<u32> = if dsv4_arch {
                 match gguf.arch_meta("attention.compress_ratios") {
                     Some(Value::Array(a)) => a
@@ -3639,10 +3851,23 @@ mod real {
                 return Err("compress_ratios shorter than the layer count".into());
             }
 
-            let load_layer = |il: u32,
-                              attn_vram_budget: &mut i64,
-                              no_budget: &mut i64|
-             -> Result<LayerW> {
+            fn load_layer_impl(
+                file: &VFile,
+                gguf: &Gguf,
+                shape: &Shape,
+                primary: i32,
+                gemma_arch: bool,
+                ink_arch: bool,
+                attn_dev: Option<i32>,
+                dsv4_arch: bool,
+                geom: &[Geom],
+                attn_layer_dev: &[i32],
+                compress_ratios: &[u32],
+                s_ple_layer: i32,
+                il: u32,
+                attn_vram_budget: &mut i64,
+                no_budget: &mut i64,
+            ) -> Result<LayerW> {
                 let t = |suffix: &str| format!("blk.{il}.{suffix}");
                 let ffn = if il < shape.n_leading_dense {
                     Ffn::Dense {
@@ -4189,6 +4414,94 @@ mod real {
                             },
                         }))
                     }
+                    Family::Qwen38 => {
+                        // probe, don't pattern-match: same hybrid layout as
+                        // qwen35 (blk.n_exec full attention regardless of
+                        // the every-4th interval)
+                        let is_attn = gguf.tensor(&t("attn_q.weight")).is_some();
+                        let (iq, ik, qn, kn) = if is_attn
+                            && gguf.tensor(&t("indexer.q_proj.weight")).is_some()
+                        {
+                            (
+                                read_f16_as_f32(&file, &gguf, &t("indexer.q_proj.weight"))?,
+                                read_f16_as_f32(&file, &gguf, &t("indexer.k_proj.weight"))?,
+                                upload(&file, &gguf, &t("indexer.q_norm.weight"))?,
+                                upload(&file, &gguf, &t("indexer.k_norm.weight"))?,
+                            )
+                        } else {
+                            (
+                                Vec::new(),
+                                Vec::new(),
+                                DeviceBuf::alloc(4)?,
+                                DeviceBuf::alloc(4)?,
+                            )
+                        };
+                        let iq_dev = {
+                            let mut b = DeviceBuf::alloc(iq.len() * 4)?;
+                            b.write(0, kernels::as_bytes(&iq))?;
+                            b
+                        };
+                        let ik_dev = {
+                            let mut b = DeviceBuf::alloc(ik.len() * 4)?;
+                            b.write(0, kernels::as_bytes(&ik))?;
+                            b
+                        };
+                        Attn::Qwen38(Box::new(Qwen38W {
+                            gdn: if is_attn {
+                                None
+                            } else {
+                                Some(Qwen38Gdn {
+                                    wqkv: MatW::load(&file, &gguf, &t("attn_qkv.weight"))?,
+                                    wz: MatW::load(&file, &gguf, &t("attn_gate.weight"))?,
+                                    conv: upload_as_f32(
+                                        &file,
+                                        &gguf,
+                                        &t("ssm_conv1d.weight"),
+                                    )?,
+                                    alpha_w: upload_as_f32(
+                                        &file,
+                                        &gguf,
+                                        &t("ssm_alpha.weight"),
+                                    )?,
+                                    beta_w: upload_as_f32(&file, &gguf, &t("ssm_beta.weight"))?,
+                                    a: upload(&file, &gguf, &t("ssm_a"))?,
+                                    dt_bias: upload(&file, &gguf, &t("ssm_dt.bias"))?,
+                                    ssm_norm: upload(&file, &gguf, &t("ssm_norm.weight"))?,
+                                    ssm_out: MatW::load(&file, &gguf, &t("ssm_out.weight"))?,
+                                })
+                            },
+                            attn: if is_attn {
+                                Some(Qwen38Attn {
+                                    wq: MatW::load(&file, &gguf, &t("attn_q.weight"))?,
+                                    wk: MatW::load(&file, &gguf, &t("attn_k.weight"))?,
+                                    wv: MatW::load(&file, &gguf, &t("attn_v.weight"))?,
+                                    out: MatW::load(&file, &gguf, &t("attn_output.weight"))?,
+                                    q_norm: upload(&file, &gguf, &t("attn_q_norm.weight"))?,
+                                    k_norm: upload(&file, &gguf, &t("attn_k_norm.weight"))?,
+                                    has_indexer: !iq.is_empty(),
+                                    idx_q_b: iq_dev,
+                                    idx_k_b: ik_dev,
+                                    idx_q_norm: qn,
+                                    idx_k_norm: kn,
+                                })
+                            } else {
+                                None
+                            },
+                            // matmul_f32 consumer: must be f32 (qwen35 convention)
+                            shexp_gate: upload_as_f32(
+                                &file,
+                                &gguf,
+                                &t("ffn_gate_inp_shexp.weight"),
+                            )?,
+                            hc_attn: load_hc_mix(&file, &gguf, il, "hc_attn")?,
+                            hc_ffn: load_hc_mix(&file, &gguf, il, "hc_ffn")?,
+                            ple: if s_ple_layer >= 0 && il == s_ple_layer as u32 {
+                                Some(load_qwen38_ple(&file, &gguf, il)?)
+                            } else {
+                                None
+                            },
+                        }))
+                    }
                 };
                 let attn_output = if dsv4_arch {
                     // V4's second-stage output projection
@@ -4198,7 +4511,7 @@ mod real {
                         &t("attn_output_b.weight"),
                         &mut *attn_vram_budget,
                     )?
-                } else if shape.family == Family::Qwen35 {
+                } else if matches!(shape.family, Family::Qwen35 | Family::Qwen38) {
                     // GDN layers project through ssm_out; attn layers
                     // through Qwen35Attn.out (MatW)
                     DeviceBuf::alloc(1)?
@@ -4302,7 +4615,13 @@ mod real {
                     None
                 };
                 Ok(LayerW {
-                    attn_norm: upload(&file, &gguf, &t("attn_norm.weight"))?,
+                    // qwen4exp has no per-layer norms at all (HC mixers
+                    // replace them); park a 4-byte dummy everywhere
+                    attn_norm: if gguf.tensor(&t("attn_norm.weight")).is_some() {
+                        upload(&file, &gguf, &t("attn_norm.weight"))?
+                    } else {
+                        DeviceBuf::alloc(4)?
+                    },
                     attn,
                     attn_output,
                     // presence decided by the file, so an arch that grows
@@ -4320,20 +4639,37 @@ mod real {
                     // qwen35 calls the pre-FFN norm post_attention_norm
                     ffn_norm: if gguf.tensor(&t("ffn_norm.weight")).is_some() {
                         upload(&file, &gguf, &t("ffn_norm.weight"))?
-                    } else {
+                    } else if gguf.tensor(&t("post_attention_norm.weight")).is_some() {
                         upload(&file, &gguf, &t("post_attention_norm.weight"))?
+                    } else {
+                        DeviceBuf::alloc(4)?
                     },
                     ffn,
                     gemma,
                     ink,
                     // laguna: per-head output gate (gating="per-head", so
                     // one column per QUERY head on this layer)
-                    attn_gate: if gguf.tensor(&t("attn_gate.weight")).is_some() {
+                    attn_gate: if shape.family != Family::K3 && shape.family != Family::Bailing && shape.family != Family::Dsv4
+                        && shape.family != Family::Mla && shape.family != Family::Qwen38
+                        && shape.family != Family::Qwen35
+                        && gguf.tensor(&t("attn_gate.weight")).is_some()
+                    {
                         Some(upload(&file, &gguf, &t("attn_gate.weight"))?)
                     } else {
                         None
                     },
                 })
+            }
+            let load_layer = |il: u32,
+                              attn_vram_budget: &mut i64,
+                              no_budget: &mut i64|
+             -> Result<LayerW> {
+                load_layer_impl(
+                    &file, &gguf, &shape, primary, gemma_arch, ink_arch,
+                    attn_dev, dsv4_arch, &geom, &attn_layer_dev,
+                    &compress_ratios, s_ple_layer, il,
+                    attn_vram_budget, no_budget,
+                )
             };
 
             let mut layers = Vec::with_capacity(shape.n_exec_layer as usize);
@@ -4349,25 +4685,120 @@ mod real {
             // sharing the base output head through shared_head_norm.
             let il = shape.n_exec_layer;
             let nextn = |suffix: &str| format!("blk.{il}.nextn.{suffix}.weight");
-            let mtp = if std::env::var("PULSAR_MTP").ok().as_deref() == Some("1") {
-                if gguf.tensor(&nextn("eh_proj")).is_none() {
-                    eprintln!("pulsar: PULSAR_MTP=1 but the gguf has no nextn block - ignoring");
-                    None
+            let mtp_on = std::env::var("PULSAR_MTP").ok().as_deref() == Some("1");
+            // Qwen38 (qwen4exp) ships its MTP block as a SEPARATE sidecar
+            // gguf (mtp-*.gguf next to the model), like deepseek-v4's MTP.
+            // Detect + open it; otherwise the nextn block lives in the main
+            // gguf (deepseek lineage).
+            let mut sc = if mtp_on {
+                let dir = if path.is_dir() {
+                    path.to_path_buf()
                 } else {
-                    let layer = load_layer(il, &mut attn_vram_budget, &mut no_budget)?;
-                    let mut res_pool = DeviceBuf::alloc(1)?;
-                    let mut res_map = std::collections::HashMap::new();
-                    if let Ffn::Moe {
-                        gate_exps,
-                        up_exps,
-                        down_exps,
-                        ..
-                    } = &layer.ffn
-                    {
-                        let total: usize = [gate_exps, up_exps, down_exps]
-                            .iter()
-                            .map(|t| t.expert_bytes as usize * shape.n_expert as usize)
-                            .sum();
+                    path.parent().map(|p| p.to_path_buf()).unwrap_or_default()
+                };
+                let sc_path = match std::env::var("PULSAR_MTP_SIDECAR")
+                    .ok()
+                    .filter(|s| !s.is_empty())
+                {
+                    Some(s) => {
+                        let p = std::path::Path::new(&s);
+                        Some(if p.is_absolute() {
+                            p.to_path_buf()
+                        } else {
+                            dir.join(&s)
+                        })
+                    }
+                    None => std::fs::read_dir(&dir)
+                        .ok()
+                        .into_iter()
+                        .flatten()
+                        .flatten()
+                        .map(|e| e.path())
+                        .filter(|p| {
+                            let n = p
+                                .file_name()
+                                .map(|s| s.to_string_lossy().to_string())
+                                .unwrap_or_default();
+                            n.starts_with("mtp-") && n.ends_with(".gguf")
+                        })
+                        .find(|p| {
+                            parse_header(p)
+                                .map(|(_, g)| g.tensor(&nextn("eh_proj")).is_some())
+                                .unwrap_or(false)
+                        }),
+                };
+                match sc_path {
+                    Some(sp) => {
+                        eprintln!("pulsar: MTP sidecar detected: {}", sp.display());
+                        let (sc_shards, sc_gguf) = parse_header(&sp)?;
+                        if std::env::var_os("PULSAR_MTP_DEBUG").is_some() {
+                            for t in &sc_gguf.tensors {
+                                eprintln!("  mtp-sidecar: {:55} {:?} ty={:?}", t.name, t.dims, t.ty);
+                            }
+                        }
+                        let sc_file = VFile::open(&sc_shards)?;
+                        Some((sc_file, sc_gguf))
+                    }
+                    None => None,
+                }
+            } else {
+                None
+            };
+
+            let mtp = if !mtp_on {
+                None
+            } else if sc.is_some() || gguf.tensor(&nextn("eh_proj")).is_some() {
+                // Split the sidecar out of `sc` up front: mf/mg borrow the
+                // owned halves below, and the file moves into MtpLayer at
+                // construction (a late sc.take() would fight those borrows).
+                let (sidecar_file, sidecar_gguf) = match sc.take() {
+                    Some((f, g)) => (Some(f), Some(g)),
+                    None => (None, None),
+                };
+                let (mf, mg) = match (&sidecar_file, &sidecar_gguf) {
+                    (Some(f), Some(g)) => (f, g),
+                    _ => (&file, &gguf),
+                };
+                let layer = load_layer_impl(
+                    mf, mg, &shape, primary, gemma_arch, ink_arch, attn_dev,
+                    dsv4_arch, &geom, &attn_layer_dev, &compress_ratios,
+                    s_ple_layer, il, &mut attn_vram_budget, &mut no_budget,
+                )?;
+                let mut res_pool = DeviceBuf::alloc(1)?;
+                let mut res_map = std::collections::HashMap::new();
+                let mut sidecar_exp_offs: std::collections::HashSet<u64> =
+                    std::collections::HashSet::new();
+                if let Ffn::Moe {
+                    gate_exps,
+                    up_exps,
+                    down_exps,
+                    ..
+                } = &layer.ffn
+                {
+                    for t in [gate_exps, up_exps, down_exps] {
+                        for e in 0..shape.n_expert as u64 {
+                            sidecar_exp_offs
+                                .insert(t.abs_offset + e * t.expert_bytes);
+                        }
+                    }
+                    let total: usize = [gate_exps, up_exps, down_exps]
+                        .iter()
+                        .map(|t| t.expert_bytes as usize * shape.n_expert as usize)
+                        .sum();
+                    // skip the grab when it can't fit: a failing cudaMalloc
+                    // leaves a stale device error the next kernel launch
+                    // reports (measured: embed_q8_0 "out of memory" that
+                    // was really the residency OOM one step earlier)
+                    let fits = match kernels::mem_info(kernels::get_device()) {
+                        Ok((free, _)) => total + SLAB_SLACK <= free,
+                        Err(_) => true,
+                    };
+                    if !fits {
+                        eprintln!(
+                            "pulsar: MTP expert residency skipped ({:.1}GiB won't fit) - drafts will stream",
+                            total as f64 / GIB
+                        );
+                    } else {
                         match DeviceBuf::alloc(total + SLAB_SLACK) {
                             Ok(mut pool) => {
                                 let mut cursor = 0usize;
@@ -4376,7 +4807,7 @@ mod real {
                                     for e in 0..shape.n_expert as u64 {
                                         let off = t.abs_offset + e * t.expert_bytes;
                                         slab.resize(t.expert_bytes as usize, 0);
-                                        file.read_exact_at(&mut slab, off)?;
+                                        mf.read_exact_at(&mut slab, off)?;
                                         pool.write(cursor, &slab)?;
                                         res_map.insert(off, cursor);
                                         cursor += t.expert_bytes as usize;
@@ -4395,19 +4826,59 @@ mod real {
                             ),
                         }
                     }
-                    let m = MtpLayer {
-                        layer,
-                        eh_proj: upload(&file, &gguf, &nextn("eh_proj"))?,
-                        enorm: upload(&file, &gguf, &nextn("enorm"))?,
-                        hnorm: upload(&file, &gguf, &nextn("hnorm"))?,
-                        head_norm: upload(&file, &gguf, &nextn("shared_head_norm"))?,
-                        res_pool,
-                        res_map,
-                    };
-                    eprintln!("pulsar: MTP draft layer loaded (speculative decode)");
-                    Some(m)
+                    if std::env::var_os("PULSAR_MTP_DEBUG").is_some() {
+                        eprintln!(
+                            "  mtp-exp: gate_off={:#x} up_off={:#x} down_off={:#x} ebytes={:#x} sidecar_data_off={:#x}",
+                            gate_exps.abs_offset,
+                            up_exps.abs_offset,
+                            down_exps.abs_offset,
+                            gate_exps.expert_bytes,
+                            mg.data_offset,
+                        );
+                    }
                 }
+                // The oracle runs the draft through the sidecar model, so
+                // its draft logits used the sidecar's own Q8_0 embedding
+                // and head - grab both (they are NOT the trunk's lower-
+                // precision copies). Best-effort: on a VRAM-tight card the
+                // draft falls back to the trunk weights.
+                let is_q8 = |n: &str| {
+                    matches!(mg.tensor(n).map(|t| t.ty), Some(TensorType::Q8_0))
+                };
+                let tok_embd = if sidecar_file.is_some() && is_q8("token_embd.weight") {
+                    upload(mf, mg, "token_embd.weight").ok()
+                } else {
+                    None
+                };
+                let output_w = if sidecar_file.is_some() && is_q8("output.weight") {
+                    upload(mf, mg, "output.weight").ok()
+                } else {
+                    None
+                };
+                let eh_proj = upload(mf, mg, &nextn("eh_proj"))?;
+                let enorm = upload(mf, mg, &nextn("enorm"))?;
+                let hnorm = upload(mf, mg, &nextn("hnorm"))?;
+                let head_norm = upload(mf, mg, &nextn("shared_head_norm"))?;
+                let sidecar = sidecar_file;
+                let m = MtpLayer {
+                    layer,
+                    eh_proj,
+                    enorm,
+                    hnorm,
+                    head_norm,
+                    res_pool,
+                    res_map,
+                    sidecar_exp_offs,
+                    sidecar,
+                    tok_embd,
+                    output_w,
+                };
+                eprintln!("pulsar: MTP draft layer loaded (speculative decode)");
+                Some(m)
             } else {
+                eprintln!(
+                    "pulsar: PULSAR_MTP=1 but the gguf has no nextn block - ignoring"
+                );
                 None
             };
             // depth default 1: the shipped nextn block is trained to
@@ -4471,6 +4942,12 @@ mod real {
             // allocations (draft models, probes) land on the fast card
             // instead of one the split already filled
             kernels::set_device(kernels::primary_device())?;
+            // Qwen38's PLE table is intentionally host/disk resident and
+            // gathered by Qwen38Rt, not uploaded with the other weights.
+            // Mark the recognized tensor before the unconsumed check.
+            if shape.family == Family::Qwen38 && shape.ple_layer >= 0 {
+                let _ = gguf.tensor("per_layer_token_embd.weight");
+            }
             // Weights the file ships that no load path asked for. Reading a
             // subset of an architecture's tensors is an error nowhere in the
             // loader, so a feature we do not model (gpt-oss ships 192 bias
@@ -4523,6 +5000,7 @@ mod real {
                 gguf,
                 token_embd,
                 output_norm,
+                output_hc,
                 output_res_score,
                 output,
                 layers,
@@ -4696,6 +5174,12 @@ mod real {
                         * (s.n_ff_exp as usize).div_ceil(kernels::Q8_K_BLOCK_ELEMS)
                         * kernels::Q8_K_BLOCK_BYTES,
                 )?,
+                midq_q8_0: DeviceBuf::alloc(
+                    mb as usize
+                        * n_used
+                        * (s.n_ff_exp as usize).div_ceil(32)
+                        * 34,
+                )?,
                 out: DeviceBuf::alloc(mb as usize * s.n_embd as usize * 4)?,
                 slot_out: DeviceBuf::alloc(mb as usize * n_used * s.n_embd as usize * 4)?,
                 ptrs: DeviceBuf::alloc(mb as usize * n_used * std::mem::size_of::<ExpertPtrs>())?,
@@ -4795,6 +5279,8 @@ mod real {
         moe_out: DeviceBuf,
         xq: DeviceBuf,
         midq: DeviceBuf,
+        /// q8_0 activations for Qwen38 Q8_0/IQ4_NL expert down weights.
+        midq_q8_0: DeviceBuf,
         pub dev_cache: DeviceSlabCache,
         /// census count each touch entry was seeded with by load_warm, so
         /// save_warm can merge on this-run deltas (seeded counts otherwise
@@ -4866,20 +5352,10 @@ mod real {
         // MLA scratch (dummies for Gqa); on the attn GPU when one is set
         q_rank: DeviceBuf,
         q_rank_norm: DeviceBuf,
-        kv_raw: DeviceBuf,
-        kv_norm: DeviceBuf,
-        qk_low: DeviceBuf,
-        mla_selected: DeviceBuf,
         // DSA indexer scratch (1-float dummies when absent): per-indexer-
         // layer K caches + q/weights/scores; selection count persists
         // across layers so non-indexer layers reuse the last list
         idx_kcache: Vec<DeviceBuf>,
-        idx_kraw: DeviceBuf,
-        /// f16 staging for the tensor-core batch scorer
-        idx_q16: DeviceBuf,
-        idx_q: DeviceBuf,
-        idx_w: DeviceBuf,
-        idx_scores: DeviceBuf,
         idx_last_sel: u32,
         // attn-GPU hop buffers (1-float dummies otherwise): normed input
         // copied primary->attn GPU, attn output copied back
@@ -4944,6 +5420,8 @@ mod real {
         dsv4: Option<dsv4::Dsv4Rt>,
         /// qwen35 runtime (GDN conv+delta states); None elsewhere
         qwen35: Option<qwen35::Qwen35Rt>,
+        /// qwen38 runtime (GDN conv+delta states + HC residual); None elsewhere
+        qwen38: Option<qwen38::Qwen38Rt>,
         k3: Option<k3::K3Rt>,
         /// bailing runtime (KDA conv+delta states); None elsewhere
         bailing: Option<bailing::BailingRt>,
@@ -4965,18 +5443,24 @@ mod real {
 
     impl State {
         pub fn new(m: &Model, ctx: u32) -> Result<State> {
-            // Mla keeps ~12GB of pinned attn weights in RAM; leave the
+            // Mla keeps ~12GB of pinned attention weights in RAM; leave the
             // host expert cache smaller so the two fit in 30GB together.
-            // With an attn GPU that RAM is free again - spend it on
-            // experts, but derive the ceiling from MEASURED free RAM: a
-            // fixed 22GB default memory-pressure-hung a 30GB box (twice,
-            // power button both times). Pinned cache memory can't swap,
-            // so the reserve must cover everything else on the machine.
+            // Qwen38 has no offloaded attention stack, so its large MoE
+            // should use the available host RAM rather than inheriting the
+            // conservative 12GiB non-attn default.
+            // Pinned cache memory can't swap, so the reserve still comes
+            // from measured MemAvailable instead of consuming the machine.
             let gb = std::env::var("PULSAR_CACHE_GB")
                 .ok()
                 .and_then(|v| v.parse::<usize>().ok())
                 .unwrap_or_else(|| {
-                    let cap = if m.attn_dev.is_some() { 22 } else { 12 };
+                    let cap = if m.shape.family == Family::Qwen38 {
+                        64
+                    } else if m.attn_dev.is_some() {
+                        22
+                    } else {
+                        12
+                    };
                     let avail_gb = std::fs::read_to_string("/proc/meminfo")
                         .ok()
                         .and_then(|s| {
@@ -5005,7 +5489,7 @@ mod real {
             if !m.recurrent_state() {
                 return Ok(());
             }
-            let qwen = m.shape.family == Family::Qwen35;
+            let qwen = matches!(m.shape.family, Family::Qwen35 | Family::Qwen38);
             let interval = if qwen { 4096 } else { 512 };
             let cap = if qwen { 2 } else { 8 };
             let last = self.ckpts.last().map(|(p, _)| *p).unwrap_or(0);
@@ -5018,6 +5502,9 @@ mod real {
                 }
                 Family::Qwen35 => RecurrentCkpt::Qwen35(
                     self.qwen35.as_ref().ok_or("qwen35 state missing")?.ckpt()?,
+                ),
+                Family::Qwen38 => RecurrentCkpt::Qwen38(
+                    self.qwen38.as_ref().ok_or("qwen38 state missing")?.ckpt()?,
                 ),
                 _ => return Ok(()),
             };
@@ -5033,7 +5520,7 @@ mod real {
         /// Restore the latest checkpoint at or before `upto`; drops the
         /// ones past it (their content no longer matches the stream).
         /// Returns the restored position.
-        pub fn restore_nearest_ckpt(&mut self, m: &Model, upto: u32) -> Result<Option<u32>> {
+        pub fn restore_nearest_ckpt(&mut self, _m: &Model, upto: u32) -> Result<Option<u32>> {
             let Some(i) = self.ckpts.iter().rposition(|(p, _)| *p <= upto) else {
                 self.ckpts.clear();
                 return Ok(None);
@@ -5049,6 +5536,11 @@ mod real {
                     .qwen35
                     .as_mut()
                     .ok_or("qwen35 state missing")?
+                    .ckpt_restore(ck)?,
+                RecurrentCkpt::Qwen38(ck) => self
+                    .qwen38
+                    .as_mut()
+                    .ok_or("qwen38 state missing")?
                     .ckpt_restore(ck)?,
             }
             self.ckpts.truncate(i + 1);
@@ -5630,7 +6122,7 @@ mod real {
                 // GQA keeps a plain [layer][kv_head][pos] cache the quant
                 // kernels understand; qwen35's full-attention layers use the
                 // same one, minus the dense split path
-                Family::Gqa | Family::Qwen35 => !kv_dense,
+                Family::Gqa | Family::Qwen35 | Family::Qwen38 => !kv_dense,
                 // MLA/Dsv4 carry their own compact latent caches; K3's
                 // MLA quarter does too, and its KDA layers keep no KV at
                 Family::Mla | Family::Dsv4 | Family::K3 | Family::Bailing => false,
@@ -5809,7 +6301,7 @@ mod real {
                 // raw SWA ring in kcache; the compressed-row cache rides
                 // vcache, sized per layer in the loop below
                 Family::Dsv4 => (s.n_swa as usize * s.head_dim as usize * 4, 4),
-                Family::Qwen35 => {
+                Family::Qwen35 | Family::Qwen38 => {
                     let b = s.n_head_kv as usize * ctx as usize * kv_row(s.head_dim as usize);
                     (b, b)
                 }
@@ -6015,22 +6507,6 @@ mod real {
             })?;
             let q_rank = f32s(if mla { 1 } else { mb * s.n_lora_q.max(1) })?;
             let q_rank_norm = f32s(if mla { 1 } else { mb * s.n_lora_q.max(1) })?;
-            let kv_raw = f32s(if mla {
-                1
-            } else {
-                mb * (s.n_kv_lora + s.qk_rope).max(1)
-            })?;
-            let kv_norm = f32s(if mla { 1 } else { mb * s.n_kv_lora.max(1) })?;
-            let qk_low = f32s(if mla {
-                1
-            } else {
-                mb * s.n_head * s.n_kv_lora.max(1)
-            })?;
-            let mla_selected = DeviceBuf::alloc(if mla {
-                4
-            } else {
-                mb as usize * ctx as usize * 4
-            })?;
             // DSA indexer buffers live beside the attn stack (same device)
             let has_idx = s.n_idx_topk > 0 && s.family == Family::Mla;
             let mut idx_kcache = Vec::new();
@@ -6058,23 +6534,6 @@ mod real {
             if attn_split {
                 kernels::set_device(m.attn_dev.unwrap_or(primary))?;
             }
-            let idx_kraw = f32s(if has_idx && !mla { mb * s.n_idx_dim } else { 1 })?;
-            let idx_q = f32s(if has_idx && !mla {
-                mb * s.n_idx_head * s.n_idx_dim
-            } else {
-                1
-            })?;
-            let idx_q16 = DeviceBuf::alloc(if has_idx && !mla {
-                (mb * s.n_idx_head * s.n_idx_dim) as usize * 2
-            } else {
-                1
-            })?;
-            let idx_w = f32s(if has_idx && !mla {
-                mb * s.n_idx_head
-            } else {
-                1
-            })?;
-            let idx_scores = f32s(if has_idx && !mla { mb * ctx } else { 1 })?;
             // per-owner attention scratch (Mla only; see MlaScratch)
             let mut attn_sc: Vec<MlaScratch> = Vec::new();
             if mla {
@@ -6301,6 +6760,12 @@ mod real {
                         * (s.n_ff_exp as usize).div_ceil(kernels::Q8_K_BLOCK_ELEMS)
                         * kernels::Q8_K_BLOCK_BYTES,
                 )?,
+                midq_q8_0: DeviceBuf::alloc(
+                    mb as usize
+                        * n_used
+                        * (s.n_ff_exp as usize).div_ceil(32)
+                        * 34,
+                )?,
                 // placeholders: the capacity solver below sizes both from
                 // MEASURED free VRAM once every fixed buffer has landed
                 // (unified boxes keep the 1-byte cache: zero-copy resolve)
@@ -6340,18 +6805,9 @@ mod real {
                 },
                 q_rank,
                 q_rank_norm,
-                kv_raw,
-                kv_norm,
-                qk_low,
-                mla_selected,
                 attn_sc,
                 sel_dev: -1,
                 idx_kcache,
-                idx_kraw,
-                idx_q16,
-                idx_q,
-                idx_w,
-                idx_scores,
                 idx_last_sel: 0,
                 normed_a,
                 attn_out_a,
@@ -6417,14 +6873,31 @@ mod real {
                     1
                 })?,
                 mtp_hidden: {
-                    let mut b = f32s(if m.mtp.is_some() { s.n_embd } else { 1 })?;
+                    let w = if m.mtp.is_some() {
+                        if s.family == Family::Qwen38 {
+                            s.n_hc * s.n_embd
+                        } else {
+                            s.n_embd
+                        }
+                    } else {
+                        1
+                    };
+                    let mut b = f32s(w)?;
                     // read before first write (position 0 has no prior
                     // hidden); zero beats uninitialized VRAM
                     let z = vec![0u8; b.bytes()];
                     b.write(0, &z)?;
                     b
                 },
-                mtp_hidden_save: f32s(if m.mtp.is_some() { s.n_embd } else { 1 })?,
+                mtp_hidden_save: f32s(if m.mtp.is_some() {
+                    if s.family == Family::Qwen38 {
+                        s.n_hc * s.n_embd
+                    } else {
+                        s.n_embd
+                    }
+                } else {
+                    1
+                })?,
                 mtp_drafted: 0,
                 mtp_accepted: 0,
                 head_xq: if m.output_kq.is_some() {
@@ -6472,6 +6945,11 @@ mod real {
                 },
                 qwen35: if s.family == Family::Qwen35 {
                     Some(qwen35::Qwen35Rt::new(m)?)
+                } else {
+                    None
+                },
+                qwen38: if s.family == Family::Qwen38 {
+                    Some(qwen38::Qwen38Rt::new(m)?)
                 } else {
                     None
                 },
@@ -6610,6 +7088,11 @@ mod real {
 
             let t0 = std::time::Instant::now();
             let warmed = if max_slab > 0 { st.load_warm(m)? } else { 0 };
+            eprintln!(
+                "pulsar: host expert cache: {:.1}GiB used / {:.1}GiB budget",
+                st.store.used as f64 / GIB,
+                st.store.budget as f64 / GIB,
+            );
             if warmed > 0 {
                 eprintln!(
                     "pulsar: warm start: {warmed} slabs in {:.1}s",
@@ -6669,6 +7152,8 @@ mod real {
                 Family::Dsv4 => return self.forward_dsv4(st, tokens, pos0, rows),
                 // GDN conv window + delta state are sequential too
                 Family::Qwen35 => return self.forward_qwen35(st, tokens, pos0, rows),
+                // GDN conv window + delta state + PLE + HC: sequential
+                Family::Qwen38 => return self.forward_qwen38(st, tokens, pos0, rows),
                 // pure-KV attention: a row's whole history is the cache, so
                 // batching rows is safe
                 // K3's KDA conv window and delta state advance per token,
@@ -6784,14 +7269,13 @@ mod real {
                 (n_tok - k) as usize * row,
                 k as usize * row,
             )?;
-            kernels::rms_norm(
-                &mut st.normed,
-                &st.last_row,
-                &self.output_norm,
-                s.n_embd,
-                k,
-                eps,
-            )?;
+            // Only families with a plain final norm reach this generic
+            // tail; qwen38's HC head lives entirely in its own forward.
+            let out_norm = self
+                .output_norm
+                .as_ref()
+                .ok_or("output_norm missing for this family")?;
+            kernels::rms_norm(&mut st.normed, &st.last_row, out_norm, s.n_embd, k, eps)?;
             self.head_logits(st, k)?;
             kernels::sync()?;
             let out = st.logits.read_f32(k as usize * s.n_vocab as usize)?;
@@ -6816,14 +7300,16 @@ mod real {
             // failing. sconv_k > 1 catches inkling's shortconv on top.
             let by_family = match self.shape.family {
                 // K3's KDA layers carry a conv window and a delta state
-                Family::Dsv4 | Family::Qwen35 | Family::K3 | Family::Bailing => true,
+                Family::Dsv4 | Family::Qwen35 | Family::Qwen38 | Family::K3 | Family::Bailing => {
+                    true
+                }
                 Family::Gqa | Family::Mla => false,
             };
             by_family || self.shape.sconv_k > 1
         }
 
         /// lm-head over the first `k` rows of st.normed into st.logits.
-        fn head_logits(&self, st: &mut State, k: u32) -> Result {
+        pub(super) fn head_logits(&self, st: &mut State, k: u32) -> Result {
             let s = self.shape;
             match self.output_kq {
                 None => kernels::matmul_q8_0(
@@ -6905,7 +7391,8 @@ mod real {
                 let mut mla_attn_done = false;
                 match &l.attn {
                     // dsv4/qwen35/k3 have their own graphs
-                    Attn::Dsv4(_) | Attn::Qwen35(_) | Attn::K3(_) | Attn::Bailing(_) => {
+                    Attn::Dsv4(_) | Attn::Qwen35(_) | Attn::K3(_) | Attn::Bailing(_)
+                    | Attn::Qwen38(_) => {
                         return Err("hybrid-family layer in the shared eval path".into())
                     }
                     Attn::Gqa {
@@ -8454,7 +8941,7 @@ mod real {
                         let unified = st.unified;
                         let async_h2d = st.async_expert_h2d;
                         let mut h2d = std::time::Duration::ZERO;
-                        let mut fetch_wait = std::time::Duration::ZERO;
+                        let fetch_wait;
                         let mut async_queued = false;
                         // TRIED AND REVERTED (2026-07-25): splitting this into
                         // two waves - launch the experts the host store already
@@ -9300,6 +9787,9 @@ mod real {
         fn mtp_prefill_fill(&self, st: &mut State, n_tok: u32, pos0: u32) -> Result {
             let Some(mtp) = &self.mtp else { return Ok(()) };
             let s = self.shape;
+            if s.family == Family::Qwen38 {
+                return self.mtp_prefill_fill_qwen38(st, n_tok, pos0);
+            }
             let primary = kernels::get_device();
             let row = s.n_embd as usize * 4;
             // hidden inputs: [old mtp_hidden, cur rows 0..n-1]
@@ -9331,7 +9821,7 @@ mod real {
             // token embeddings (st.tok still holds the chunk)
             kernels::embed_q8_0(
                 &mut st.mtp_e_raw,
-                &self.token_embd,
+                mtp.tok_embd.as_ref().unwrap_or(&self.token_embd),
                 &st.tok,
                 s.n_embd,
                 s.n_vocab,
@@ -9393,8 +9883,13 @@ mod real {
         /// append the block's KV, return the greedy draft for pos+1.
         /// Clobbers st.cur.
         fn mtp_draft(&self, st: &mut State, token: u32, pos: u32) -> Result<u32> {
-            self.mtp_body(st, token, pos)?;
             let mtp = self.mtp.as_ref().ok_or("mtp_draft without an MTP layer")?;
+            // Qwen38: self-contained MTP draft (wide HC state, broadcast,
+            // full-attention MTP block, shared output_hc head)
+            if self.shape.family == Family::Qwen38 {
+                return self.forward_qwen38_mtp_draft(st, &mtp.layer, token, pos);
+            }
+            self.mtp_body(st, token, pos)?;
             let s = self.shape;
             kernels::rms_norm(
                 &mut st.normed,
@@ -9425,7 +9920,7 @@ mod real {
             st.tok.write(0, kernels::as_bytes(&[token as i32]))?;
             kernels::embed_q8_0(
                 &mut st.mtp_e_raw,
-                &self.token_embd,
+                mtp.tok_embd.as_ref().unwrap_or(&self.token_embd),
                 &st.tok,
                 s.n_embd,
                 s.n_vocab,
@@ -9511,11 +10006,13 @@ mod real {
         let spec = model.mtp.is_some() && sampler.is_greedy();
         let mut pos = pos0;
         let mut logits = None;
-        // qwen35 MTP prefill: the draft-layer scratch is 16-row and the
-        // qwen35 forward leaves only its LAST 16-row chunk in st.cur, so
-        // the fill pass needs outer chunks capped to match (the forward
-        // is internally 16-chunked anyway - same work either way)
-        let chunk_cap = if spec && model.shape.family == Family::Qwen35 {
+        // qwen35/qwen38 MTP prefill: the draft-layer scratch is 16-row and
+        // the recurrent forward leaves only its LAST 16-row chunk in the
+        // wide residual (st.cur / rt.res_hc), so the fill pass needs outer
+        // chunks capped to match (the forward is internally 16-chunked
+        // anyway - same work either way). The mtp_hidden anchor stitches
+        // the chunk boundaries.
+        let chunk_cap = if spec && matches!(model.shape.family, Family::Qwen35 | Family::Qwen38) {
             16
         } else {
             st.max_batch() as usize
@@ -9623,7 +10120,11 @@ mod real {
 
         if spec {
             let v = model.shape.n_vocab as usize;
-            let row = model.shape.n_embd as usize * 4;
+            let row = if model.shape.family == Family::Qwen38 {
+                model.shape.n_hc as usize * model.shape.n_embd as usize * 4
+            } else {
+                model.shape.n_embd as usize * 4
+            };
             let depth_max = model.mtp_depth.max(1);
             let debug = std::env::var_os("PULSAR_MTP_DEBUG").is_some();
             let timing = std::env::var_os("PULSAR_MTP_TIMING").is_some();
@@ -9654,7 +10155,10 @@ mod real {
                 for i in 0..depth {
                     let d = model.mtp_draft(st, chain[i as usize], pos + i)?;
                     st.mtp_drafted += 1;
-                    kernels::copy_d2d(&mut st.mtp_hidden, 0, &st.cur, 0, row)?;
+                    // Qwen38 re-anchors its wide st.mtp_hidden inside mtp_draft
+                    if model.shape.family != Family::Qwen38 {
+                        kernels::copy_d2d(&mut st.mtp_hidden, 0, &st.cur, 0, row)?;
+                    }
                     chain.push(d);
                     if stop(d) {
                         break; // no point speculating past a stop token
@@ -9674,13 +10178,24 @@ mod real {
                 // round. Snapshot first; full acceptance means the state
                 // is exactly right (free), partial acceptance restores
                 // and re-forwards the accepted prefix.
-                let recurrent = model.shape.family == Family::Qwen35;
+                let recurrent =
+                    matches!(model.shape.family, Family::Qwen35 | Family::Qwen38);
                 let t0 = std::time::Instant::now();
+                let mut q38_ckpt = None;
                 if recurrent {
-                    st.qwen35
-                        .as_mut()
-                        .ok_or("qwen35 state missing")?
-                        .gdn_snapshot()?;
+                    if model.shape.family == Family::Qwen38 {
+                        q38_ckpt = Some(
+                            st.qwen38
+                                .as_mut()
+                                .ok_or("qwen38 state missing")?
+                                .ckpt()?,
+                        );
+                    } else {
+                        st.qwen35
+                            .as_mut()
+                            .ok_or("qwen35 state missing")?
+                            .gdn_snapshot()?;
+                    }
                 }
                 let all = model
                     .forward_rows(st, &chain, pos, (k + 1) as u32)?
@@ -9693,10 +10208,17 @@ mod real {
                 }
                 if recurrent && j < k {
                     let t0 = std::time::Instant::now();
-                    st.qwen35
-                        .as_mut()
-                        .ok_or("qwen35 state missing")?
-                        .gdn_restore()?;
+                    if model.shape.family == Family::Qwen38 {
+                        st.qwen38
+                            .as_mut()
+                            .ok_or("qwen38 state missing")?
+                            .ckpt_restore(&q38_ckpt.as_ref().expect("qwen38 ckpt"))?;
+                    } else {
+                        st.qwen35
+                            .as_mut()
+                            .ok_or("qwen35 state missing")?
+                            .gdn_restore()?;
+                    }
                     // no logits; leaves st.cur/st.tok holding exactly the
                     // accepted rows for the fill pass below
                     model.forward_batch(st, &chain[..=j], pos, false)?;

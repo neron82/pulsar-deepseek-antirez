@@ -381,7 +381,7 @@ impl Model {
         kernels::rms_norm(
             &mut st.normed,
             &st.cur,
-            &self.output_norm,
+            self.output_norm.as_ref().ok_or("output_norm missing")?,
             s.n_embd,
             1,
             s.rms_eps,

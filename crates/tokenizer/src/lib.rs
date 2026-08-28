@@ -500,11 +500,10 @@ impl ChatMarkers {
     }
 
     /// True when the assistant opener leaves a reasoning block OPEN, so
-    /// generation starts inside it and the first ` response` closes it.
-    /// GLM, DeepSeek and hybrid-thinking ChatML with thinking on are the
-    /// only such styles: ` thinking` is the last PROMPT token, never a
-    /// generated one, so a consumer that waits for an opening tag would
-    /// route the whole reply to reasoning.
+    /// generation starts inside it and the generated closing delimiter
+    /// transitions to the answer. The delimiter is a literal `</think>` on
+    /// native Qwen/DeepSeek exports or a byte-BPE response marker on older
+    /// exports.
     pub fn opens_thinking(&self) -> bool {
         matches!(
             self.style,
@@ -780,10 +779,12 @@ impl ChatMarkers {
                 // the GGUF-embedded chat template).
                 // Markers may be byte-encoded (Ġthinking) in the vocab.
                 let ts = t
-                    .find_token(" thinking")
+                    .find_token("<think>")
+                    .or_else(|| t.find_token(" thinking"))
                     .or_else(|| t.find_token("Ġthinking"));
                 let te = t
-                    .find_token(" response")
+                    .find_token("</think>")
+                    .or_else(|| t.find_token(" response"))
                     .or_else(|| t.find_token("Ġresponse"));
                 if let (Some(ts), Some(te)) = (ts, te) {
                     if self.think {
@@ -2228,5 +2229,54 @@ mod tests {
     fn glm4_whitespace_run_leaves_last_for_next_word() {
         let pieces: Vec<&[u8]> = pretokenize_glm4(b"a    b");
         assert_eq!(pieces, vec![&b"a"[..], &b"   "[..], &b" b"[..]]);
+    }
+
+    #[test]
+    fn qwen_chatml_opens_literal_think_block() {
+        let tokens = vec![
+            "<|im_start|>",
+            "<|im_end|>",
+            "<think>",
+            "</think>",
+            "assistant",
+        ]
+        .into_iter()
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+        let token_to_id = tokens
+            .iter()
+            .enumerate()
+            .map(|(i, token)| (token.clone(), i as u32))
+            .collect();
+        let mut byte_to_char = ['\0'; 256];
+        let mut char_to_byte = HashMap::with_capacity(256);
+        for byte in 0..=255u8 {
+            let ch = gpt2_byte_to_char(byte);
+            byte_to_char[byte as usize] = ch;
+            char_to_byte.insert(ch, byte);
+        }
+        let tokenizer = Tokenizer {
+            tokens,
+            token_to_id,
+            merge_rank: HashMap::new(),
+            byte_to_char,
+            char_to_byte,
+            bos_id: Some(0),
+            eos_id: Some(1),
+            eot_id: None,
+            stop_ids: vec![1],
+            add_bos: false,
+            pre: Pre::Qwen2,
+        };
+        let markers = ChatMarkers::resolve(&tokenizer).expect("ChatML markers");
+        let opener = markers.open_assistant(&tokenizer);
+        assert!(
+            opener.iter().position(|&id| id == 2).is_some(),
+            "ChatML reasoning prompt must include <think>"
+        );
+        assert!(
+            opener.iter().position(|&id| id == 3).is_none(),
+            "thinking-on prompt must leave </think> for generation"
+        );
     }
 }

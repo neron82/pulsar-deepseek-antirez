@@ -116,7 +116,7 @@ fn run_chat(
         }
 
         let mut bytes = Vec::new();
-        pos = engine::generate(
+        let next_pos = match engine::generate(
             model,
             &mut st,
             &ids,
@@ -134,13 +134,25 @@ fn run_chat(
                 stop
             },
             |id| {
-                if std::env::var_os("PULSAR_DEBUG_IDS").is_some() {
-                    eprint!("[{id}]");
+                let piece = tok.decode(&[id]);
+                // Qwen4 emits the literal closing control tag after its
+                // reasoning block. It is a delimiter, not user-visible
+                // answer text; keep the reasoning and answer but hide it.
+                if piece.as_slice() == b"<think>" || piece.as_slice() == b"</think>" {
+                    return;
                 }
-                bytes.extend_from_slice(&tok.decode(&[id]));
+                bytes.extend_from_slice(&piece);
                 print_utf8_prefix(&mut bytes);
             },
-        )?;
+        ) {
+            Ok(next) => next,
+            Err(e) if e.to_string().starts_with("qwen38: position") => {
+                eprintln!("pulsar chat: {e}; ending this session cleanly");
+                break;
+            }
+            Err(e) => return Err(e),
+        };
+        pos = next_pos;
         println!();
     }
     st.save_warm(model)?;

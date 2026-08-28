@@ -259,6 +259,12 @@ mod real {
             in_dim: u32,
             n_rows: u32,
         ) -> i32;
+        fn pulsar_quantize_q8_0(
+            out: *mut c_void,
+            x: *const c_void,
+            in_dim: u32,
+            n_rows: u32,
+        ) -> i32;
         fn pulsar_moe_pair_swiglu(
             mid: *mut c_void,
             ptrs: *const c_void,
@@ -284,6 +290,29 @@ mod real {
             row_bytes: u64,
             quant: u32,
             ext: *const c_void,
+        ) -> i32;
+        fn pulsar_moe_down_q8_0(
+            out: *mut c_void,
+            ptrs: *const c_void,
+            mid: *const c_void,
+            mid_dim: u32,
+            out_dim: u32,
+            n_used: u32,
+            n_tok: u32,
+            row_bytes: u64,
+            quant: u32,
+            ext: *const c_void,
+        ) -> i32;
+        fn pulsar_moe_down_q8_0_per_slot(
+            out: *mut c_void,
+            ptrs: *const c_void,
+            mid: *const c_void,
+            mid_dim: u32,
+            out_dim: u32,
+            n_used: u32,
+            n_tok: u32,
+            row_bytes: u64,
+            quant: u32,
         ) -> i32;
         fn pulsar_moe_down_per_slot(
             out: *mut c_void,
@@ -647,6 +676,76 @@ mod real {
             s: *const c_void,
             n_rows: u32,
             dim: u32,
+        ) -> i32;
+        fn pulsar_qwen38_hc_norm(
+            out: *mut c_void,
+            x: *const c_void,
+            w: *const c_void,
+            rows: u32,
+            n_embd: u32,
+            hc: u32,
+            eps: f32,
+        ) -> i32;
+        fn pulsar_qwen38_hc_mean(
+            out: *mut c_void,
+            xn: *const c_void,
+            n_tok: u32,
+            n_embd: u32,
+            hc: u32,
+        ) -> i32;
+        fn pulsar_qwen38_broadcast_hc(
+            out: *mut c_void,
+            src: *const c_void,
+            n_tok: u32,
+            n_embd: u32,
+            hc: u32,
+        ) -> i32;
+        fn pulsar_qwen38_hc_combine(
+            res: *mut c_void,
+            blk_out: *const c_void,
+            inj: *const c_void,
+            n_tok: u32,
+            n_embd: u32,
+            hc: u32,
+        ) -> i32;
+        fn pulsar_qwen38_ple_gate(
+            gate: *mut c_void,
+            score: *const c_void,
+            n_rows: u32,
+        ) -> i32;
+        fn pulsar_qwen38_ple_conv(
+            out: *mut c_void,
+            x: *const c_void,
+            kern: *const c_void,
+            n_tok: u32,
+            dim: u32,
+            padded: u32,
+            k: u32,
+            dil: u32,
+        ) -> i32;
+        fn pulsar_qwen38_ple_score(
+            gate: *mut c_void,
+            key: *const c_void,
+            query: *const c_void,
+            n_tok: u32,
+            n_embd: u32,
+            hc: u32,
+            scale: f32,
+        ) -> i32;
+        fn pulsar_qwen38_ple_apply(
+            out: *mut c_void,
+            value: *const c_void,
+            gate: *const c_void,
+            n_tok: u32,
+            n_embd: u32,
+            hc: u32,
+        ) -> i32;
+        fn pulsar_qwen38_residual_add(
+            res: *mut c_void,
+            tile: *const c_void,
+            n_tok: u32,
+            n_embd: u32,
+            hc: u32,
         ) -> i32;
         fn pulsar_qwen35_selftest() -> i32;
         #[allow(clippy::too_many_arguments)]
@@ -1489,7 +1588,12 @@ mod real {
         src_off: usize,
         bytes: usize,
     ) -> Result {
-        assert!(dst_off + bytes <= dst.bytes() && src_off + bytes <= src.bytes());
+        assert!(
+            dst_off + bytes <= dst.bytes() && src_off + bytes <= src.bytes(),
+            "copy_d2d OOB: dst {dst_off}+{bytes} > {} | src {src_off}+{bytes} > {}",
+            dst.bytes(),
+            src.bytes()
+        );
         check_rt(
             unsafe {
                 cudaMemcpy(
@@ -2253,6 +2357,14 @@ mod real {
         )
     }
 
+    /// Quantize f32 rows to the GGML q8_0 activation format.
+    pub fn quantize_q8_0(out: &mut DeviceBuf, x: &DeviceBuf, in_dim: u32, n_rows: u32) -> Result {
+        check(
+            unsafe { pulsar_quantize_q8_0(out.ptr_mut(), x.ptr(), in_dim, n_rows) },
+            "quantize_q8_0",
+        )
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub fn moe_pair_swiglu(
         mid: &mut DeviceBuf,
@@ -2318,6 +2430,71 @@ mod real {
                 )
             },
             "moe_down",
+        )
+    }
+
+    /// Down projection for weights whose GGML activation type is q8_0
+    /// (Q8_0 and IQ4_NL), using packed q8_0 intermediate rows.
+    #[allow(clippy::too_many_arguments)]
+    pub fn moe_down_q8_0(
+        out: &mut DeviceBuf,
+        ptrs: &DeviceBuf,
+        mid: &DeviceBuf,
+        mid_dim: u32,
+        out_dim: u32,
+        n_used: u32,
+        n_tok: u32,
+        row_bytes: u64,
+        quant: u32,
+        ext: Option<&DeviceBuf>,
+    ) -> Result {
+        check(
+            unsafe {
+                pulsar_moe_down_q8_0(
+                    out.ptr_mut(),
+                    ptrs.ptr(),
+                    mid.ptr(),
+                    mid_dim,
+                    out_dim,
+                    n_used,
+                    n_tok,
+                    row_bytes,
+                    quant,
+                    ext.map_or(std::ptr::null(), |b| b.ptr()),
+                )
+            },
+            "moe_down_q8_0",
+        )
+    }
+
+    /// Per-slot q8_0 down projection for cross-device canonical splicing.
+    #[allow(clippy::too_many_arguments)]
+    pub fn moe_down_q8_0_per_slot(
+        out: &mut DeviceBuf,
+        ptrs: &DeviceBuf,
+        mid: &DeviceBuf,
+        mid_dim: u32,
+        out_dim: u32,
+        n_used: u32,
+        n_tok: u32,
+        row_bytes: u64,
+        quant: u32,
+    ) -> Result {
+        check(
+            unsafe {
+                pulsar_moe_down_q8_0_per_slot(
+                    out.ptr_mut(),
+                    ptrs.ptr(),
+                    mid.ptr(),
+                    mid_dim,
+                    out_dim,
+                    n_used,
+                    n_tok,
+                    row_bytes,
+                    quant,
+                )
+            },
+            "moe_down_q8_0_per_slot",
         )
     }
 
@@ -3338,6 +3515,204 @@ mod real {
 
     pub fn qwen35_selftest() -> bool {
         unsafe { pulsar_qwen35_selftest() != 0 }
+    }
+
+    /* ---- qwen38 (qwen4exp): HC mixers + PLE ------------------------- */
+
+    /// Grouped RMS norm over the [rows][hc][n_embd] residual streams with
+    /// a full-width gamma (or weightless when `w` is None).
+    pub fn qwen38_hc_norm(
+        out: &mut DeviceBuf,
+        x: &DeviceBuf,
+        w: Option<&DeviceBuf>,
+        rows: u32,
+        n_embd: u32,
+        hc: u32,
+        eps: f32,
+    ) -> Result {
+        check(
+            unsafe {
+                pulsar_qwen38_hc_norm(
+                    out.ptr_mut(),
+                    x.ptr(),
+                    w.map(|b| b.ptr()).unwrap_or(std::ptr::null()),
+                    rows,
+                    n_embd,
+                    hc,
+                    eps,
+                )
+            },
+            "qwen38_hc_norm",
+        )
+    }
+    /// In-place variant: the CUDA kernel documents out-aliasing-x as safe
+    /// (per-stream reduction reads a stream fully before writing it).
+    pub fn qwen38_hc_norm_inplace(
+        x: &mut DeviceBuf,
+        w: Option<&DeviceBuf>,
+        rows: u32,
+        n_embd: u32,
+        hc: u32,
+        eps: f32,
+    ) -> Result {
+        check(
+            unsafe {
+                pulsar_qwen38_hc_norm(
+                    x.ptr_mut(),
+                    x.ptr(),
+                    w.map(|b| b.ptr()).unwrap_or(std::ptr::null()),
+                    rows,
+                    n_embd,
+                    hc,
+                    eps,
+                )
+            },
+            "qwen38_hc_norm_inplace",
+        )
+    }
+
+    /// Stream-mean collapse of [n_tok][hc][n_embd] -> [n_tok][n_embd].
+    pub fn qwen38_hc_mean(
+        out: &mut DeviceBuf,
+        xn: &DeviceBuf,
+        n_tok: u32,
+        n_embd: u32,
+        hc: u32,
+    ) -> Result {
+        check(
+            unsafe { pulsar_qwen38_hc_mean(out.ptr_mut(), xn.ptr(), n_tok, n_embd, hc) },
+            "qwen38_hc_mean",
+        )
+    }
+
+    /// Replicate each n_embd-wide row of src across all hc streams:
+    /// out[t][c][e] = src[t][e]. Token-major layouts, t rows.
+    pub fn qwen38_broadcast_hc(
+        out: &mut DeviceBuf,
+        src: &DeviceBuf,
+        n_tok: u32,
+        n_embd: u32,
+        hc: u32,
+    ) -> Result {
+        check(
+            unsafe {
+                pulsar_qwen38_broadcast_hc(out.ptr_mut(), src.ptr(), n_tok, n_embd, hc)
+            },
+            "qwen38_broadcast_hc",
+        )
+    }
+
+    /// res_hc[s][e] += blk_out[row(s)][e] * 2*sigmoid(inj[s]); in place.
+    pub fn qwen38_hc_combine(
+        res: &mut DeviceBuf,
+        blk_out: &DeviceBuf,
+        inj: &DeviceBuf,
+        n_tok: u32,
+        n_embd: u32,
+        hc: u32,
+    ) -> Result {
+        check(
+            unsafe {
+                pulsar_qwen38_hc_combine(
+                    res.ptr_mut(),
+                    blk_out.ptr(),
+                    inj.ptr(),
+                    n_tok,
+                    n_embd,
+                    hc,
+                )
+            },
+            "qwen38_hc_combine",
+        )
+    }
+
+    /// PLE signed-magnitude gate logits: g = sgn(s)*sqrt(max(|s|,1e-6)).
+    pub fn qwen38_ple_gate(gate: &mut DeviceBuf, score: &DeviceBuf, n_rows: u32) -> Result {
+        check(
+            unsafe { pulsar_qwen38_ple_gate(gate.ptr_mut(), score.ptr(), n_rows) },
+            "qwen38_ple_gate",
+        )
+    }
+
+    /// PLE dilated depthwise conv + silu. x holds [hist | tokens] rows;
+    /// output is [n_tok][dim].
+    #[allow(clippy::too_many_arguments)]
+    pub fn qwen38_ple_conv(
+        out: &mut DeviceBuf,
+        x: &DeviceBuf,
+        kern: &DeviceBuf,
+        n_tok: u32,
+        dim: u32,
+        padded: u32,
+        k: u32,
+        dil: u32,
+    ) -> Result {
+        check(
+            unsafe {
+                pulsar_qwen38_ple_conv(
+                    out.ptr_mut(),
+                    x.ptr(),
+                    kern.ptr(),
+                    n_tok,
+                    dim,
+                    padded,
+                    k,
+                    dil,
+                )
+            },
+            "qwen38_ple_conv",
+        )
+    }
+    /// PLE signed-score reduce + magnitude gate logits per (token,stream).
+    pub fn qwen38_ple_score(
+        gate: &mut DeviceBuf,
+        key: &DeviceBuf,
+        query: &DeviceBuf,
+        n_tok: u32,
+        n_embd: u32,
+        hc: u32,
+        scale: f32,
+    ) -> Result {
+        check(
+            unsafe {
+                pulsar_qwen38_ple_score(
+                    gate.ptr_mut(), key.ptr(), query.ptr(), n_tok, n_embd, hc, scale,
+                )
+            },
+            "qwen38_ple_score",
+        )
+    }
+
+    /// out[t*hc+c][e] = value[t][e] * sigmoid(gate[t*hc+c]).
+    pub fn qwen38_ple_apply(
+        out: &mut DeviceBuf,
+        value: &DeviceBuf,
+        gate: &DeviceBuf,
+        n_tok: u32,
+        n_embd: u32,
+        hc: u32,
+    ) -> Result {
+        check(
+            unsafe {
+                pulsar_qwen38_ple_apply(out.ptr_mut(), value.ptr(), gate.ptr(), n_tok, n_embd, hc)
+            },
+            "qwen38_ple_apply",
+        )
+    }
+    /// res_hc[t][c][e] += tile[t][c][e]: PLE block's per-stream residual.
+    pub fn qwen38_residual_add(
+        res: &mut DeviceBuf,
+        tile: &DeviceBuf,
+        n_tok: u32,
+        n_embd: u32,
+        hc: u32,
+    ) -> Result {
+        check(
+            unsafe {
+                pulsar_qwen38_residual_add(res.ptr_mut(), tile.ptr(), n_tok, n_embd, hc)
+            },
+            "qwen38_residual_add",
+        )
     }
 
     /// KDA mixing coefficients in place: g becomes the lower-bounded

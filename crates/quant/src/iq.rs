@@ -138,7 +138,7 @@ fn make_qp_quants(n: usize, nmax: i32, x: &[f32], ls: &mut [u8], qw: &[f32]) -> 
         return 0.0;
     }
     let mut iscale = nmax as f32 / max;
-    let mut scale = 1.0 / iscale;
+    let scale = 1.0 / iscale;
     let mut best_mse = 0f32;
     for i in 0..n {
         let l = nearest_int(iscale * x[i]).min(nmax);

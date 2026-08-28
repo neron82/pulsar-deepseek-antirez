@@ -611,7 +611,6 @@ impl CompLane {
 struct DevLane {
     st_kv: DeviceBuf, // [rows][width]
     st_sc: DeviceBuf,
-    width: u32,
     ratio: u32,
 }
 
@@ -623,7 +622,6 @@ impl DevLane {
         let mut l = DevLane {
             st_kv: DeviceBuf::alloc((rows * width) as usize * 4)?,
             st_sc: DeviceBuf::alloc((rows * width) as usize * 4)?,
-            width,
             ratio,
         };
         l.reset()?;
@@ -670,9 +668,7 @@ pub(super) struct Dsv4Prof {
     pub idx_d2h: std::time::Duration,      // per-emit idx_cache read_f32_at syncs
     pub idx_comp: std::time::Duration,     // idx dsv4_comp_step launches
     pub loop_att: std::time::Duration,     // per-token attention_at kernels
-    pub moe_resolve: std::time::Duration,  // dsv4_moe: distinct/tiers/store
     pub moe_kernels: std::time::Duration,  // dsv4_moe: GPU launches
-    pub cpu_lane: std::time::Duration,     // dsv4_moe: CPU worker join
     pub sync: std::time::Duration,         // explicit kernel syncs
 }
 
@@ -839,7 +835,7 @@ impl Dsv4Rt {
 }
 
 /// One layer's recurrent snapshot (dsv4).
-pub(super) struct Dsv4LayerCkpt {
+pub struct Dsv4LayerCkpt {
     comp: Option<(DeviceBuf, DeviceBuf)>,
     n_comp: u32,
     idx: Option<(DeviceBuf, DeviceBuf)>,
@@ -866,7 +862,6 @@ fn indexer_allowed(
     if n_comp <= top_k {
         return None;
     }
-    let t0 = std::time::Instant::now();
     rope_tail_host(q, n_head, head_dim, n_rot, pos, rope);
     for h in 0..n_head {
         qat_row(&mut q[h * head_dim..(h + 1) * head_dim]);
@@ -1120,7 +1115,7 @@ impl Model {
         kernels::rms_norm(
             &mut st.normed,
             &st.last_row,
-            &self.output_norm,
+            self.output_norm.as_ref().ok_or("output_norm missing")?,
             s.n_embd,
             1,
             s.rms_eps,
@@ -1685,7 +1680,6 @@ impl Model {
             let cap = lrt.idx_cache.bytes() / (nd.max(1) * 4);
             let mut score_off = 0usize;
             let mut q_off = 0usize;
-            let t_prep = std::time::Instant::now();
             for (k, &i) in idx_mask_i.iter().enumerate() {
                 let n = idx_mask_ncomp[k] as usize;
                 // host prep (bit-exact with indexer_allowed)
@@ -1743,7 +1737,6 @@ impl Model {
             }
             // ONE bulk readback of all scores (contiguous per-token
             // regions, each padded to cap*4 bytes).
-            let t_readback = std::time::Instant::now();
             let total = idx_mask_i.len() * cap;
             let all_scores = rt.idx_scores.read_f32(total)?;
             // host top-k per token; pack masks into ONE blob so the
@@ -2101,6 +2094,14 @@ impl Model {
         // per-layer swiglu clamp (bailingmoe3 routed experts); 0 for families
         // whose clamp is baked into act_op (dsv4 op 3, k3 op 4) or absent.
         let clamp = self.clamp_exp_l.get(il).copied().unwrap_or(0.0);
+        // GGML assigns q8_0 activations to both Q8_0 and IQ4_NL weights.
+        // Qwen38 mixes those down weights with q8_K gate/up weights, so
+        // keep a separate packed activation buffer for its down projection.
+        let down_q8_0 = self.shape.family == super::Family::Qwen38
+            && matches!(
+                down_exps.quant,
+                kernels::QUANT_Q8_0 | kernels::QUANT_IQ4_NL
+            );
         // Claim cross-layer async H2D prefetch (dsv4 layer-crossing port of
         // the MLA pattern): the previous layer queued this layer's predicted
         // experts into staging_alt. Drain it into resolved BEFORE the
@@ -2162,7 +2163,8 @@ impl Model {
         // CPU expert lane (PULSAR_CPU=1): same contract as the full
         // resolve - host-cached experts compute on the worker pool, no
         // fetch, no upload, partial joins moe_out after the tier gather.
-        let cpu_on = st.cpu_pool.is_some()
+        let cpu_on = !down_q8_0
+            && st.cpu_pool.is_some()
             && n_tok <= 8
             && !st.unified
             && w_exp % 256 == 0
@@ -2267,11 +2269,28 @@ impl Model {
         }
         let in_use: Vec<u64> = offsets.iter().map(|r| r.offset).collect();
         let mut wants = Vec::new();
+        let mut sc_wants = Vec::new();
+        let mt = self.mtp.as_ref();
         for r in &offsets {
             if resolved.contains_key(&r.offset) {
                 // prefetched into staging_alt by the previous layer; the
                 // drain above already claimed it
                 continue;
+            }
+            // Draft-layer experts: resident pool first (no fetch at all),
+            // then the sidecar file. Their absolute offsets live in the
+            // sidecar's address space - the trunk store owns trunk
+            // offsets, and fetching these there reads the PLE table
+            // (all-NaN d fields).
+            if let Some(m) = mt {
+                if let Some(&bo) = m.res_map.get(&r.offset) {
+                    resolved.insert(r.offset, m.res_pool.ptr_at(bo));
+                    continue;
+                }
+                if m.sidecar.is_some() && m.sidecar_exp_offs.contains(&r.offset) {
+                    sc_wants.push(*r);
+                    continue;
+                }
             }
             if st.unified {
                 wants.push(*r);
@@ -2286,7 +2305,7 @@ impl Model {
         }
         let mut stage_base = std::collections::HashMap::new();
         let mut stage_total = 0usize;
-        for r in &wants {
+        for r in wants.iter().chain(sc_wants.iter()) {
             stage_base.insert(r.offset, stage_total);
             stage_total += r.len as usize;
         }
@@ -2320,6 +2339,29 @@ impl Model {
             resolved.insert(off, p);
             Ok(())
         })?;
+        // Streamed (non-resident) draft experts: their slabs live in the
+        // sidecar file, fetched with the same dev_cache/staging policy as
+        // the store. Runs before the async wait so staged copies are
+        // recorded into the same H2D drain.
+        if let Some(m) = mt {
+            if let Some(sf) = &m.sidecar {
+                for r in &sc_wants {
+                    let mut payload = vec![0u8; r.len as usize];
+                    sf.read_exact_at(&mut payload, r.offset)?;
+                    let p = match dev_cache.maybe_insert(r.offset, &payload, &in_use)? {
+                        Some(p) => p,
+                        None => {
+                            let base = stage_base[&r.offset];
+                            st.expert_h2d
+                                .copy_h2d_raw(staging, base, payload.as_ptr(), payload.len())?;
+                            staged_any = true;
+                            staging.ptr_at(base)
+                        }
+                    };
+                    resolved.insert(r.offset, p);
+                }
+            }
+        }
         if st.async_expert_h2d && staged_any {
             st.expert_h2d.record()?;
             st.expert_h2d.wait_default()?;
@@ -2364,7 +2406,8 @@ impl Model {
         // smem ONCE per launch instead of once per row - the dp4a path
         // re-decodes iq3/iq4 codebooks per slot, which measured as THE
         // DFlash verify cost at 6.5ms/layer).
-        let grouped = n_tok >= 16
+        let grouped = !down_q8_0
+            && n_tok >= 16
             && s.n_expert_used <= 16
             && s.n_ff_exp % 256 == 0
             && 2 * gate_exps.row_bytes.max(up_exps.row_bytes) * 4 <= 49152
@@ -2493,36 +2536,59 @@ impl Model {
                     gate_exps.quant,
                     act_op,
                 )?;
-                kernels::quantize_q8_k(
-                    &mut tier.midq,
-                    &tier.mid,
-                    s.n_ff_exp,
-                    n_tok * s.n_expert_used,
-                )?;
-                // per-slot, UNSUMMED: the primary splices these into its
-                // own accumulation at the slot's position, so the f32 add
-                // sequence is identical to the single-device loop
-                let sbytes = n_tok as usize * s.n_expert_used as usize * w_exp as usize * 4;
+                if down_q8_0 {
+                    kernels::quantize_q8_0(
+                        &mut tier.midq_q8_0,
+                        &tier.mid,
+                        s.n_ff_exp,
+                        n_tok * s.n_expert_used,
+                    )?;
+                } else {
+                    kernels::quantize_q8_k(
+                        &mut tier.midq,
+                        &tier.mid,
+                        s.n_ff_exp,
+                        n_tok * s.n_expert_used,
+                    )?;
+                }
+                // Per-slot down results are spliced on the primary so
+                // tiering preserves the canonical slot accumulation order.
+                let sbytes =
+                    n_tok as usize * s.n_expert_used as usize * w_exp as usize * 4;
                 if tier.slot_out.bytes() < sbytes {
                     tier.slot_out = DeviceBuf::alloc(sbytes)?;
                 }
-                kernels::moe_down_per_slot(
-                    &mut tier.slot_out,
-                    &tier.ptrs,
-                    &tier.midq,
-                    s.n_ff_exp,
-                    w_exp,
-                    s.n_expert_used,
-                    n_tok,
-                    down_exps.row_bytes,
-                    down_exps.quant,
-                )?;
+                if down_q8_0 {
+                    kernels::moe_down_q8_0_per_slot(
+                        &mut tier.slot_out,
+                        &tier.ptrs,
+                        &tier.midq_q8_0,
+                        s.n_ff_exp,
+                        w_exp,
+                        s.n_expert_used,
+                        n_tok,
+                        down_exps.row_bytes,
+                        down_exps.quant,
+                    )?;
+                } else {
+                    kernels::moe_down_per_slot(
+                        &mut tier.slot_out,
+                        &tier.ptrs,
+                        &tier.midq,
+                        s.n_ff_exp,
+                        w_exp,
+                        s.n_expert_used,
+                        n_tok,
+                        down_exps.row_bytes,
+                        down_exps.quant,
+                    )?;
+                }
                 flat_tiers.push(ti);
             }
             kernels::set_device(primary)?;
         }
-        // The primary owns the non-tier slots.  Rebuild their activations
-        // every layer; tier slots are NULL here and are supplied via `ext`.
+        // The primary owns the non-tier slots. Rebuild their activations
+        // every layer; tier slots are supplied through `ext`.
         kernels::moe_pair_swiglu(
             &mut st.moe_mid,
             &st.expert_ptrs,
@@ -2537,18 +2603,25 @@ impl Model {
             gate_exps.quant,
             act_op,
         )?;
-        kernels::quantize_q8_k(
-            &mut st.midq,
-            &st.moe_mid,
-            s.n_ff_exp,
-            n_tok * s.n_expert_used,
-        )?;
+        if down_q8_0 {
+            kernels::quantize_q8_0(
+                &mut st.midq_q8_0,
+                &st.moe_mid,
+                s.n_ff_exp,
+                n_tok * s.n_expert_used,
+            )?;
+        } else {
+            kernels::quantize_q8_k(
+                &mut st.midq,
+                &st.moe_mid,
+                s.n_ff_exp,
+                n_tok * s.n_expert_used,
+            )?;
+        }
 
-        // resident-tier slots ride in `ext` ([n_tok][n_used][out_dim]):
-        // each tier's per-slot down results were computed by the identical
-        // reduction over identical bytes, and the primary's moe_down
-        // inserts them at their slot positions inside its canonical
-        // accumulation - bit-exact vs the single-device loop, no reordering.
+        // Resident-tier slot results are merged into an f32 ext buffer before
+        // the primary down projection. This preserves the canonical slot
+        // accumulation order on both q8_0 and q8_K down paths.
         let legacy = std::env::var_os("PULSAR_TIER_LEGACY").is_some();
         let mut ext: Option<&DeviceBuf> = None;
         if !flat_tiers.is_empty() && !legacy {
@@ -2557,9 +2630,6 @@ impl Model {
                 st.tier_ext = DeviceBuf::alloc(n)?;
             }
             kernels::zero(&mut st.tier_ext, n)?;
-            // merge every flat tier's per-slot rows (slot sets are disjoint;
-            // zero rows from other slots add nothing and are never read -
-            // moe_down consults ext only for its own NULL-down slots)
             for &ti in &flat_tiers {
                 let tier = &st.tiers[ti];
                 kernels::set_device(tier.dev)?;
@@ -2571,9 +2641,7 @@ impl Model {
             ext = Some(&st.tier_ext);
         }
         if legacy {
-            // DIAGNOSTIC: old-style summed join over the new per-slot
-            // buffers - isolates per-slot value correctness from splice
-            // insertion correctness
+            // Diagnostic old-style summed join for the legacy comparison.
             for &ti in &flat_tiers {
                 let tier = &mut st.tiers[ti];
                 kernels::set_device(tier.dev)?;
@@ -2587,19 +2655,33 @@ impl Model {
                 kernels::set_device(primary)?;
             }
         }
-        kernels::moe_down(
-            &mut st.moe_out,
-            &st.expert_ptrs,
-            &st.midq,
-            s.n_ff_exp,
-            w_exp,
-            s.n_expert_used,
-            n_tok,
-            down_exps.row_bytes,
-            down_exps.quant,
-            ext,
-        )?;
-
+        if down_q8_0 {
+            kernels::moe_down_q8_0(
+                &mut st.moe_out,
+                &st.expert_ptrs,
+                &st.midq_q8_0,
+                s.n_ff_exp,
+                w_exp,
+                s.n_expert_used,
+                n_tok,
+                down_exps.row_bytes,
+                down_exps.quant,
+                ext,
+            )?;
+        } else {
+            kernels::moe_down(
+                &mut st.moe_out,
+                &st.expert_ptrs,
+                &st.midq,
+                s.n_ff_exp,
+                w_exp,
+                s.n_expert_used,
+                n_tok,
+                down_exps.row_bytes,
+                down_exps.quant,
+                ext,
+            )?;
+        }
         if legacy {
             for ti in &flat_tiers {
                 let n = (n_tok * w_exp) as usize * 4;
@@ -2985,13 +3067,13 @@ pub(super) fn ckpt_read(inp: &mut &[u8]) -> Result<Vec<Dsv4LayerCkpt>> {
     let n = u32::from_le_bytes(inp[..4].try_into().unwrap()) as usize;
     *inp = &inp[4..];
     let mut out = Vec::with_capacity(n);
-    let mut pair = |inp: &mut &[u8]| -> Result<Option<(DeviceBuf, DeviceBuf)>> {
+    let pair = |inp: &mut &[u8]| -> Result<Option<(DeviceBuf, DeviceBuf)>> {
         let has = inp[0] == 1;
         *inp = &inp[1..];
         if !has {
             return Ok(None);
         }
-        let mut rd = |inp: &mut &[u8]| -> Result<DeviceBuf> {
+        let rd = |inp: &mut &[u8]| -> Result<DeviceBuf> {
             let bytes = u64::from_le_bytes(inp[..8].try_into().unwrap()) as usize;
             *inp = &inp[8..];
             let mut b = DeviceBuf::alloc(bytes.max(4))?;
