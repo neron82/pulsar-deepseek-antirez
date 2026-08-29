@@ -1322,8 +1322,8 @@ mod real {
         layer_dev: Vec<i32>,
         mtp: Option<MtpLayer>,
         /// Draft-chain depth (PULSAR_MTP_DEPTH): tokens speculated per
-        /// round, verified together in one forward. Default 3 for Qwen38
-        /// (its MTP head is trained to chain), 1 elsewhere.
+        /// round, verified together in one forward. Default 1 - see the
+        /// measurement note at the mtp_depth setup for when deeper wins.
         pub mtp_depth: u32,
         /// (row_bytes, quant) when output.weight is a K-quant (AngelSlim
         /// ggufs keep the lm-head q6_K); None = the q8_0 fast path.
@@ -4883,17 +4883,19 @@ mod real {
                 None
             };
             // depth default 1: the shipped nextn block is trained to
-            // predict ONE step from a true hidden; self-fed chaining is
             // out-of-distribution and acceptance collapses with depth
-            // (Hy3 measured 30% -> 23% -> 10% at depths 1/3/5)
-            // Qwen38's oracle (llama.cpp, same model/card) chains at depth
-            // 3 with acc-per-pos (0.86, 0.52, 0.25) - depth 1 leaves the
-            // draft's cost unrecovered, so default to its trained chain.
+            // (Hy3 measured 30% -> 23% -> 10% at depths 1/3/5).
+            // Qwen38 measured 2026-08-29 (Q8_0 head, 3090 solo): pos-1
+            // acceptance ~44% at depth 1 AND depth 3 - the chain breaks
+            // early, so depth 3's 4-token verify + longer reject
+            // re-forward cost more than it returns (4.15 vs 6.51 t/s).
+            // The llama.cpp oracle's 0.86 pos-1 (Q4_K_M head, both GPUs)
+            // would justify PULSAR_MTP_DEPTH=3 when that head is used.
             let mtp_depth = if mtp.is_some() {
                 std::env::var("PULSAR_MTP_DEPTH")
                     .ok()
                     .and_then(|v| v.parse::<u32>().ok())
-                    .unwrap_or(if shape.family == Family::Qwen38 { 3 } else { 1 })
+                    .unwrap_or(1)
                     .clamp(1, 8)
             } else {
                 0
