@@ -1321,8 +1321,9 @@ mod real {
         /// and the layer evals there.
         layer_dev: Vec<i32>,
         mtp: Option<MtpLayer>,
-        /// Draft-chain depth (PULSAR_MTP_DEPTH, default 3): tokens
-        /// speculated per round, verified together in one forward.
+        /// Draft-chain depth (PULSAR_MTP_DEPTH): tokens speculated per
+        /// round, verified together in one forward. Default 3 for Qwen38
+        /// (its MTP head is trained to chain), 1 elsewhere.
         pub mtp_depth: u32,
         /// (row_bytes, quant) when output.weight is a K-quant (AngelSlim
         /// ggufs keep the lm-head q6_K); None = the q8_0 fast path.
@@ -4885,11 +4886,14 @@ mod real {
             // predict ONE step from a true hidden; self-fed chaining is
             // out-of-distribution and acceptance collapses with depth
             // (Hy3 measured 30% -> 23% -> 10% at depths 1/3/5)
+            // Qwen38's oracle (llama.cpp, same model/card) chains at depth
+            // 3 with acc-per-pos (0.86, 0.52, 0.25) - depth 1 leaves the
+            // draft's cost unrecovered, so default to its trained chain.
             let mtp_depth = if mtp.is_some() {
                 std::env::var("PULSAR_MTP_DEPTH")
                     .ok()
                     .and_then(|v| v.parse::<u32>().ok())
-                    .unwrap_or(1)
+                    .unwrap_or(if shape.family == Family::Qwen38 { 3 } else { 1 })
                     .clamp(1, 8)
             } else {
                 0
