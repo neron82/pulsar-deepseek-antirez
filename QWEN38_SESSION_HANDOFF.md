@@ -1,10 +1,12 @@
 # Qwen 3.8 Flash Next — session handoff (2026-08-28)
 
-Status: **All tracked items done** (second pass 2026-08-28: redundant
-PLE/embed syncs removed + on-device embed broadcast — bit-exact-verified
-by greedy A/B, see §5.1–5.2). All work uncommitted on `main`.
-The +32 GB RAM upgrade landed (~120 GB total); host expert-cache
-coverage is unmeasured — see §5.4.
+Status: **All tracked items done and committed** on `main` (2026-08-29,
+see `git log`). The MTP sidecar expert-fetch fix is smoke-verified on the
+3090 (`scripts/smoke-3090.sh`): trunk **12.29 tok/s** — on par with the
+llama.cpp no-MTP baseline; MTP with the Q8_0 head is roughly break-even
+(pos-1 acceptance ~44% is the head's ceiling; the head's VRAM cost
+outweighs the draft gain on a solo 3090). Remaining lever: a better MTP
+head from Qwen, or a Q4_K_M draft on a second GPU (llama.cpp's setup).
 
 ## 1. Task
 
