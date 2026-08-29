@@ -3,11 +3,11 @@
 #
 # Prereq: the 3090 inference engine is STOPPED, i.e.
 #     ~/models/start_qwen38abl.sh stop
-# so GPU 1 (3090, 24 GB) is free. GPU 0 (3060 Ti, 8 GB) is untouched.
+# so the 3090 (24 GB, CUDA device 0) is free. The 3060 Ti is untouched.
 #
 # Legs (all greedy, one pass each - this is a smoke, not the A/B):
 #   1 trunk    - baseline, no MTP
-#   2 mtp      - MTP depth 1 via the sidecar, timing on
+#   2 mtp      - MTP via the sidecar (default depth 3 on qwen38), timing on
 #   3 mtp-dbg  - PULSAR_MTP_DEBUG: moe_dbg / mtp-draft lines
 #               (the sidecar expert fetch itself - the fix under test)
 #   4 tier     - MTP with a 2 GiB expert pool -> tier path must stay clean
@@ -18,13 +18,16 @@ SC=~/models/qwen38flash/UD-Q3_K_XL/mtp-Qwen3.8-Flash-Next-Q8_0.gguf
 P="Explain how a memory-mapped file works in a virtual memory system. Be concise but technical, covering page tables, demand paging, and copy-on-write semantics for a short, self-contained essay-driven architecture in embedded systems."
 LOG=/tmp/smoke3090
 mkdir -p "$LOG"
-export CUDA_VISIBLE_DEVICES=1
+# WarpgateX quirk: nvidia-smi enumerates 3060 Ti as 0 / 3090 as 1, but
+# CUDA (and every CUDA_VISIBLE_DEVICES consumer) has them INVERTED:
+# 0 = 3090 (24 GB), 1 = 3060 Ti (8 GB). Trust CUDA, not nvidia-smi.
+export CUDA_VISIBLE_DEVICES=0
 
 echo "=== 1 trunk (baseline, no MTP) ==="
 ./target/release/pulsar-cli -m "$M" -p "$P" -n 256 --ctx 4096 > "$LOG/1_trunk.log" 2>&1
 grep -E 'tokens in|prefill' "$LOG/1_trunk.log"
 
-echo "=== 2 mtp (depth 1, sidecar, timing) ==="
+echo "=== 2 mtp (sidecar, timing) ==="
 PULSAR_MTP=1 PULSAR_MTP_SIDECAR="$SC" PULSAR_MTP_TIMING=1 \
   ./target/release/pulsar-cli -m "$M" -p "$P" -n 256 --ctx 4096 > "$LOG/2_mtp.log" 2>&1
 grep -E 'tokens in|prefill|drafts accepted|MTP' "$LOG/2_mtp.log"
