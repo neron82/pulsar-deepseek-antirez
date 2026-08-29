@@ -1,11 +1,14 @@
-# pulsar-deepseek-antirez
+# pulsar-multimodel
 
 ![pulsar](docs/assets/pulsar-poster.png)
 
 **A speed-optimized fork of [Pulsar](https://github.com/giannisanni/pulsar)**
 tuned for the **DwarfStar build** of **DeepSeek V4 Flash 0731** (antirez
 [ds4](https://github.com/antirez/ds4) weights, `DeepSeek-V4-Flash-0731`
-IQ2XXS imatrix GGUF).
+IQ2XXS imatrix GGUF), and extended with full support for **Ling 3.0 Flash**
+(bailingmoe3) and **Qwen 3.8 Flash Next** (qwen4exp — wide hyper-connection
+residual, GDN + gated-attention hybrid layers, PLE n-gram hash embeddings,
+plus its MTP/nextn sidecar for speculative decode behind `PULSAR_MTP=1`).
 
 This fork keeps the upstream engine intact — same Rust + CUDA, same
 NVMe-streamed expert architecture, same bit-exactness discipline — and
